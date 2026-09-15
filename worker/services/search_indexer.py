@@ -205,7 +205,7 @@ class SearchPipelineSetupService:
                 InputFieldMappingEntry(name="file_data", source="/document/file_data"),
             ],
             outputs=[
-                OutputFieldMappingEntry(name="layoutText", target_name="layout_content"),
+                OutputFieldMappingEntry(name="content", target_name="layout_content"),
             ],
         )
 
