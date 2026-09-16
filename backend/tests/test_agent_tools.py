@@ -138,6 +138,10 @@ def test_search_documents_tool_executes_embedding_and_search() -> None:
             "app.agent.tools.search_tool.hybrid_search",
             return_value=expected_results,
         ) as mock_search,
+        patch(
+            "app.agent.tools.search_tool.review_evidence",
+            return_value=expected_results,
+        ) as mock_review,
     ):
         result = tool.execute(arguments)
 
@@ -146,9 +150,11 @@ def test_search_documents_tool_executes_embedding_and_search() -> None:
     mock_search.assert_called_once_with(
         "What is the rent?",
         [0.1, 0.2, 0.3],
+        top=10,
         file_name="contract.pdf",
         parent_document_id=None,
     )
+    mock_review.assert_called_once_with("What is the rent?", expected_results)
 
     assert result == expected_results
 

@@ -9,37 +9,6 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-_ADDRESS_TERMS = ("כתובת", "מען", "address", "located", "location")
-_PROPERTY_TERMS = (
-    "כתובת הנכס", "הנכס", "המושכר", "הדירה", "הבניין",
-    "גוש", "חלקה", "property", "premises", "apartment", "building",
-)
-_PARTY_ADDRESS_TERMS = (
-    "כתובות:", "כתובות הצדדים", "כתובת להודעות", "מען להודעות",
-    "address for notices", "addresses of the parties",
-)
-
-
-def _rerank_for_intent(
-    query: str,
-    results: list[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    query_text = query.casefold()
-    if not any(term in query_text for term in _ADDRESS_TERMS):
-        return results
-
-    def intent_score(item: dict[str, Any]) -> tuple[float, float]:
-        content = str(item.get("content") or "").casefold()
-        role_score = sum(1.0 for term in _PROPERTY_TERMS if term in content)
-        role_score -= sum(3.0 for term in _PARTY_ADDRESS_TERMS if term in content)
-        azure_score = item.get("reranker_score")
-        if azure_score is None:
-            azure_score = item.get("score") or 0.0
-        return role_score, float(azure_score)
-
-    return sorted(results, key=intent_score, reverse=True)
-
-
 def _escape_odata_string(value: str) -> str:
     return value.replace("'", "''")
 
@@ -137,7 +106,7 @@ def hybrid_search(
             }
             for result in results
         ]
-        return _rerank_for_intent(query, structured_results)[:top]
+        return structured_results[:top]
     except Exception:
         logger.exception("Azure AI Search hybrid query failed")
         raise

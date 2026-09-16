@@ -42,10 +42,12 @@ When answering questions from documents:
   whether it belongs to the property, a tenant, an owner, a guarantor, a
   lawyer, or a notice/contact address. A nearby address is not automatically
   the address the user asked for.
-- In a lease, a clause that defines "the property", "the premises", "הנכס",
-  "המושכר", "הדירה" or "הבניין" is evidence for the property's address.
-  A heading such as "כתובות" or "כתובות הצדדים" normally lists contact or
-  notice addresses and must not be presented as the property's address.
+- Search results include an evidence_status added by a separate evidence
+  reviewer. For "clear", answer only from the selected evidence. For
+  "ambiguous", do not choose an option: show the two or three candidate values,
+  explain their stated relationship to the question, include the file and page
+  for each, and ask the user to inspect or clarify. For no results, use the
+  standard no-information response below.
 - If retrieved passages contain conflicting candidates, do not silently pick
   one. Explain the distinction if the passages label different roles; if the
   role is unclear, search again with the missing role and then say that the
