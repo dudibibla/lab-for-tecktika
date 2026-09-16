@@ -137,7 +137,7 @@ def test_non_streaming_followup_search_returns_final_answer():
         patch("app.agent.tools.search_tool.create_query_embedding", return_value=[0.1]),
         patch("app.agent.tools.search_tool.hybrid_search", return_value=[]) as search,
     ):
-        assert run_agent("address") == "10 Test Street."
+        assert run_agent("address") == "אין לי מידע על כך במסמכים שברשותי."
     assert search.call_count == 2
 
 

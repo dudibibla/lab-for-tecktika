@@ -27,7 +27,12 @@ class SearchDocumentsTool(BaseTool[SearchDocumentsArgs]):
             file_name=arguments.file_name,
             parent_document_id=arguments.parent_document_id,
         )
-        if _is_exploration_or_section_request(arguments.query):
+        if _is_exploration_or_section_request(
+            arguments.query,
+            has_document_scope=bool(
+                arguments.file_name or arguments.parent_document_id
+            ),
+        ):
             return [
                 {
                     **item,
@@ -41,11 +46,22 @@ class SearchDocumentsTool(BaseTool[SearchDocumentsArgs]):
         return review_evidence(arguments.query, results)
 
 
-def _is_exploration_or_section_request(query: str) -> bool:
+def _is_exploration_or_section_request(
+    query: str,
+    *,
+    has_document_scope: bool,
+) -> bool:
     normalized = " ".join(query.casefold().split())
-    patterns = (
+    if not has_document_scope:
+        return False
+    section_patterns = (
         r"(?:תציג|הצג|צטט|תראה|תקרא|שאלה|סעיף|פרק)",
-        r"(?:ספר לי על|מידע (?:על|לגבי)|מה כתוב|על מה)",
-        r"(?:show|display|quote|read|question|section|summari[sz]e|tell me about)",
+        r"(?:show|display|quote|read|question|section)",
     )
-    return any(re.search(pattern, normalized) for pattern in patterns)
+    if any(re.search(pattern, normalized) for pattern in section_patterns):
+        return True
+    exploration_patterns = (
+        r"(?:ספר לי על|מידע (?:על|לגבי)|מה כתוב|על מה)",
+        r"(?:summari[sz]e|tell me about)",
+    )
+    return any(re.search(pattern, normalized) for pattern in exploration_patterns)

@@ -437,3 +437,97 @@ def test_explicit_search_file_is_not_overwritten_by_conversation_context() -> No
     result = _apply_search_file_context(arguments, "lease.pdf")
 
     assert result.file_name == "other.pdf"
+
+
+def test_run_agent_blocks_general_knowledge_without_document_search() -> None:
+    from openai.types.chat import ChatCompletionMessage
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.agent.runner import OUT_OF_SCOPE_RESPONSE, run_agent
+
+    model_answer = SimpleNamespace(choices=[SimpleNamespace(
+        message=ChatCompletionMessage(
+            role="assistant",
+            content="שורש 2 הוא בערך 1.414.",
+        ),
+    )])
+
+    with patch(
+        "app.agent.runner.create_chat_completion",
+        return_value=model_answer,
+    ):
+        assert run_agent("כמה זה שורש 2?") == OUT_OF_SCOPE_RESPONSE
+
+
+def test_stream_agent_blocks_general_knowledge_without_document_search() -> None:
+    from openai.types.chat import ChatCompletionMessage
+    from types import SimpleNamespace
+    from unittest.mock import patch
+
+    from app.agent.runner import OUT_OF_SCOPE_RESPONSE, stream_agent
+
+    model_answer = SimpleNamespace(choices=[SimpleNamespace(
+        message=ChatCompletionMessage(
+            role="assistant",
+            content="The square root of 2 is about 1.414.",
+        ),
+    )])
+
+    with patch(
+        "app.agent.runner.create_chat_completion",
+        return_value=model_answer,
+    ):
+        events = list(stream_agent(
+            "What is the square root of 2?",
+            requested_by="user1",
+        ))
+
+    assert [event.type for event in events] == ["delta"]
+    assert events[0].delta == OUT_OF_SCOPE_RESPONSE
+
+
+def test_stream_agent_replaces_hallucination_after_empty_search() -> None:
+    from unittest.mock import MagicMock, patch
+
+    from app.agent.runner import (
+        NO_DOCUMENT_INFORMATION_RESPONSE,
+        stream_agent,
+    )
+
+    first_response = MagicMock()
+    tool_call = MagicMock()
+    tool_call.id = "call_1"
+    tool_call.function.name = "search_documents"
+    tool_call.function.arguments = '{"query":"square root of 2"}'
+    first_response.choices[0].message.tool_calls = [tool_call]
+
+    search_tool = MagicMock()
+    search_tool.name = "search_documents"
+    search_tool.execute.return_value = []
+
+    with (
+        patch(
+            "app.agent.runner.create_chat_completion",
+            return_value=first_response,
+        ),
+        patch(
+            "app.agent.runner.stream_chat_completion",
+            return_value=iter(["It is ", "1.414."]),
+        ),
+        patch(
+            "app.agent.runner.get_tool_by_name",
+            return_value=search_tool,
+        ),
+        patch(
+            "app.agent.runner.parse_tool_arguments",
+            return_value=MagicMock(),
+        ),
+    ):
+        events = list(stream_agent(
+            "כמה זה שורש 2?",
+            requested_by="user1",
+        ))
+
+    assert [event.type for event in events] == ["delta"]
+    assert events[0].delta == NO_DOCUMENT_INFORMATION_RESPONSE

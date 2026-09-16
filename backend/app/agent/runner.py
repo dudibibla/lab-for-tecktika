@@ -44,6 +44,11 @@ MAX_TOOL_ROUNDS = 5
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARACTERS = 24_000
 MAX_CITATIONS = 5
+NO_DOCUMENT_INFORMATION_RESPONSE = "אין לי מידע על כך במסמכים שברשותי."
+OUT_OF_SCOPE_RESPONSE = (
+    "אני יכול לענות רק על שאלות המבוססות על המסמכים במערכת "
+    "ולעזור בניהול הקבצים."
+)
 AgentMessage = ChatCompletionMessageParam | ChatCompletionMessage
 
 
@@ -51,6 +56,43 @@ class AmbiguousDocumentReference(ValueError):
     def __init__(self, candidates: list[str]) -> None:
         self.candidates = candidates
         super().__init__("Document name is ambiguous")
+
+
+def _can_answer_without_document_evidence(user_message: str) -> bool:
+    """Allow only harmless product conversation without a document lookup.
+
+    Document facts and general-knowledge questions are deliberately absent
+    from this allowlist. The model may classify an intent incorrectly, so this
+    application check is the boundary that prevents an ungrounded answer.
+    """
+    normalized = " ".join(user_message.casefold().split())
+    patterns = (
+        r"^(?:שלום|היי|הי|בוקר טוב|ערב טוב|hello|hi|hey)[!.? ]*$",
+        r"^(?:תודה|תודה רבה|מעולה|אחלה|סבבה|thanks|thank you)[!.? ]*$",
+        r"(?:מה אתה יכול לעשות|איך אתה יכול לעזור|מה היכולות שלך|"
+        r"how can you help|what can you do|your capabilities)",
+        r"(?:למה לא ענית|מדוע לא ענית|למה ענית|הסבר את התשובה|"
+        r"why (?:didn't|did not|did) you answer|explain (?:your|the) answer)",
+    )
+    return any(re.search(pattern, normalized) for pattern in patterns)
+
+
+def _safe_final_answer(
+    user_message: str,
+    model_content: str,
+    *,
+    search_attempted: bool,
+    has_document_evidence: bool,
+    listed_documents: bool,
+) -> str:
+    """Enforce that factual answers are grounded in the document library."""
+    if has_document_evidence or listed_documents:
+        return model_content
+    if search_attempted:
+        return NO_DOCUMENT_INFORMATION_RESPONSE
+    if _can_answer_without_document_evidence(user_message):
+        return model_content
+    return OUT_OF_SCOPE_RESPONSE
 
 
 def _normalize_document_reference(value: str) -> str:
@@ -488,6 +530,9 @@ def run_agent(
     context_file_name = explicit_file_name or _conversation_file_context(
         history, attachment_file_name
     )
+    search_attempted = False
+    has_document_evidence = False
+    listed_documents = False
 
     for round_index in range(MAX_TOOL_ROUNDS + 1):
         response = create_chat_completion(messages, tools=openai_tools)
@@ -497,7 +542,13 @@ def run_agent(
             content = assistant_message.content or ""
             if not content.strip():
                 raise ValueError("The model returned an empty answer. Please try again.")
-            return content
+            return _safe_final_answer(
+                user_message,
+                content,
+                search_attempted=search_attempted,
+                has_document_evidence=has_document_evidence,
+                listed_documents=listed_documents,
+            )
         if round_index == MAX_TOOL_ROUNDS:
             raise ValueError("The search limit was reached. Please narrow your question.")
 
@@ -523,6 +574,11 @@ def run_agent(
             )
 
             result = tool.execute(arguments)
+            if tool.name == "search_documents":
+                search_attempted = True
+                has_document_evidence = isinstance(result, list) and bool(result)
+            elif tool.name == "list_documents":
+                listed_documents = True
 
             messages.append(
                 {
@@ -591,6 +647,9 @@ def stream_agent(
 
     assistant_message = response.choices[0].message
     pending_citations: list[Citation] = []
+    search_attempted = False
+    has_document_evidence = False
+    listed_documents = False
     for round_index in range(MAX_TOOL_ROUNDS + 1):
         tool_calls = assistant_message.tool_calls or []
 
@@ -600,10 +659,17 @@ def stream_agent(
             if not content.strip():
                 raise ValueError("The model returned an empty answer. Please try again.")
 
-            if content:
+            safe_content = _safe_final_answer(
+                user_message,
+                content,
+                search_attempted=search_attempted,
+                has_document_evidence=has_document_evidence,
+                listed_documents=listed_documents,
+            )
+            if safe_content:
                 yield AgentEvent(
                     type="delta",
-                    delta=content,
+                    delta=safe_content,
                 )
 
             return
@@ -731,10 +797,14 @@ def stream_agent(
             result = tool.execute(arguments)
 
             if tool.name == "search_documents":
+                search_attempted = True
+                has_document_evidence = isinstance(result, list) and bool(result)
                 # Only expose evidence from the most recent, refined search.
                 # Earlier rounds are intermediate reasoning and caused the UI
                 # to show dozens of duplicate and often less relevant sources.
                 pending_citations = _citations_from_results(result)
+            elif tool.name == "list_documents":
+                listed_documents = True
 
             messages.append(
                 {
@@ -755,9 +825,20 @@ def stream_agent(
         if next_message is None:
             if not any(chunk.strip() for chunk in text_chunks):
                 raise ValueError("The model returned an empty answer. Please try again.")
-            if pending_citations:
+            model_content = "".join(text_chunks)
+            safe_content = _safe_final_answer(
+                user_message,
+                model_content,
+                search_attempted=search_attempted,
+                has_document_evidence=has_document_evidence,
+                listed_documents=listed_documents,
+            )
+            if pending_citations and has_document_evidence:
                 yield AgentEvent(type="citations", citations=pending_citations)
-            for chunk in text_chunks:
-                yield AgentEvent(type="delta", delta=chunk)
+            if safe_content == model_content:
+                for chunk in text_chunks:
+                    yield AgentEvent(type="delta", delta=chunk)
+            else:
+                yield AgentEvent(type="delta", delta=safe_content)
             return
         assistant_message = next_message

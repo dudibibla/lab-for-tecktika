@@ -2,7 +2,7 @@ import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from app.agent.runner import stream_agent
+from app.agent.runner import OUT_OF_SCOPE_RESPONSE, stream_agent
 from app.schemas.chat import ChatHistoryMessage
 from app.services.file_resolver import ResolvedDocument
 
@@ -468,7 +468,9 @@ def test_stream_agent_sends_previous_turns_to_model() -> None:
     assert messages[1]["content"] == "Read contract.pdf"
     assert messages[2]["content"] == "It is the vendor agreement."
     assert messages[3]["content"] == "What is its notice period?"
-    assert events[0].delta == "It is 30 days."
+    # Conversation history supplies context, but it is not document evidence.
+    # The model must search before it can return the factual answer.
+    assert events[0].delta == OUT_OF_SCOPE_RESPONSE
 
 
 def test_conversation_context_uses_latest_single_cited_document() -> None:
