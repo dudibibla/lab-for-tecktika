@@ -1,102 +1,93 @@
-# Architecture & Resource Justification
+# Architecture
 
-## 1. System Architecture Diagram
+מסמך זה מתאר את המימוש הפעיל נכון ל-16 בספטמבר 2026.
+
+## רכיבים
+
+| שכבה | שירות | אחריות |
+|---|---|---|
+| UI | React/Vite ב-Azure Static Web Apps | צ'אט, העלאה, אישורים, מקורות ומעקב עבודות |
+| API | FastAPI ב-Azure Container Apps | אימות, שיחה, הפעלת כלים, RAG ושמירת היסטוריה |
+| Agent | Azure OpenAI `gpt-5-mini` | בחירת כלי וניסוח תשובה מבוססת מקורות |
+| Retrieval | Azure AI Search | BM25, וקטורים, Semantic Ranker וסינון לפי מסמך |
+| Source of truth | Azure Blob Storage | ספריית PDF פעילה; תחליף זמני ל-SharePoint |
+| Ingestion | Azure Functions | עיבוד הודעות Queue וסנכרון האינדקס |
+| Extraction | Azure AI Document Intelligence | חילוץ layout וטקסט מעמודי PDF |
+| State | Queue + Table Storage | עבודות, אישורים, שיחות וקובץ פעיל בשיחה |
+| Identity | Entra ID + Managed Identity | אימות משתמש והרשאות בין שירותים ללא סודות בקוד |
+| Telemetry | Application Insights + Log Analytics | לוגים, תקלות ו-correlation IDs |
+
+## קריאה ושאלות
+
+1. ה-frontend שולח JWT והודעה ל-`POST /api/chat/message`.
+2. ה-backend טוען את היסטוריית השיחה ואת המסמך הפעיל.
+3. הסוכן מפעיל `search_documents` או `list_documents` לפי הצורך.
+4. החיפוש משלב טקסט, embedding ו-Semantic Ranker. כשידוע שם המסמך נוסף filter.
+5. שכבת evidence review מסווגת את התוצאות כ-`clear`, `ambiguous` או `insufficient`.
+6. בתוצאה ברורה נשלחת תשובה ישירה עם מקורות. בעמימות מוצגות האפשרויות והמקורות למשתמש. בחוסר ראיות המערכת נמנעת מניחוש.
+7. אירועי SSE מזרים טקסט, citations, בקשת אישור, job IDs וסיום.
+
+שמירת המסמך הפעיל פותרת שאלות המשך כגון "הצג את שאלה א'" אחרי שאלה קודמת על אותו מבחן. החיפוש הרחב עדיין זמין כאשר אין מסמך פעיל או כשהמשתמש מבקש לחפש בכל הספרייה.
+
+## העלאה, החלפה ומחיקה
 
 ```mermaid
-flowchart TD
-    subgraph Client ["Client Layer"]
-        User["User Browser"]
-        ReactApp["React Frontend (SPA)"]
-    end
+sequenceDiagram
+    participant U as User
+    participant F as Frontend
+    participant A as Backend
+    participant S as Blob/Table/Queue
+    participant W as Worker
+    participant R as AI Search
 
-    subgraph Compute ["Compute & Agent Layer"]
-        FastAPI["FastAPI LLM Agent Service"]
-        Worker["Azure Functions (Queue Worker)"]
-    end
-
-    subgraph Storage ["Storage & State"]
-        SharePoint["SharePoint Library / Azure Blob (Source of Truth)"]
-        Queue["Azure Storage Queue (Ingestion Jobs)"]
-        Table["Azure Table Storage (Job State Machine)"]
-    end
-
-    subgraph AI ["AI & Retrieval Layer"]
-        OpenAI["Azure OpenAI (GPT-4o / Embeddings)"]
-        AISearch["Azure AI Search (Integrated Vectorization)"]
-    end
-
-    User --> ReactApp
-    ReactApp -->|Stream Chat / Trigger Job| FastAPI
-    FastAPI -->|Tool Validation / Retrieval| AISearch
-    FastAPI -->|LLM Reasoning| OpenAI
-    FastAPI -->|Enqueue Ingestion Job| Queue
-    FastAPI -->|Set Job Status: QUEUED| Table
-    
-    Queue -->|Trigger| Worker
-    Worker -->|ETag Check / Fetch| SharePoint
-    Worker -->|Trigger Indexer / Sync Chunks| AISearch
-    Worker -->|Update Status: RUNNING / SUCCEEDED / FAILED| Table
-    ReactApp -.->|Poll Status| Table
+    U->>F: בקשת העלאה/החלפה/מחיקה
+    F->>A: Chat או metadata של upload
+    A-->>F: אישור נדרש אם הפעולה הרסנית
+    U->>F: מאשר
+    F->>A: confirmationId + decision
+    A->>S: יצירת Job והודעת Queue
+    A-->>F: jobId
+    S->>W: Queue trigger
+    W->>S: קריאה/מחיקה של Blob
+    W->>R: index / purge
+    W->>S: SUCCEEDED או FAILED
+    F->>A: polling לסטטוס
 ```
 
----
+- העלאה חדשה נשמרת ומאונדקסת ברקע.
+- שם שכבר קיים הופך לזרימת החלפה ודורש אישור.
+- מחיקה מפורשת מזוהה באופן דטרמיניסטי לפני פנייה למודל. התאמה חלקית מתקבלת רק כאשר יש מועמד יחיד ברור; אחרת המשתמש בוחר.
+- `confirmationId` נתבע אטומית כדי למנוע הפעלה כפולה.
+- המחיקה מסירה גם את ה-Blob וגם את כל ה-chunks של אותו `parentDocumentId`.
 
-## 2. Resource Choices & Justifications (Requirement 3.4)
+## אינדוקס
 
-| Component | Selected Azure Resource | Considered Alternatives | Why Alternatives Were Rejected |
-|---|---|---|---|
-| **Source of Truth / File Storage** | SharePoint Document Library / Azure Blob Storage | Azure Files, AWS S3 | SharePoint is mandated as the primary source of truth. |
-| **API Compute** | Azure Container Apps (FastAPI) | Azure App Service, Azure Functions (HTTP) | Better cold-start characteristics, native containerization, cost-efficient micro-scaling. |
-| **Queue & Worker** | Azure Storage Queue + Azure Functions (Python v2) | Azure Service Bus, RabbitMQ, Celery | Storage Queues provide lightweight, highly durable, low-cost at-least-once delivery with native Azure Functions bindings. |
-| **Search Tier** | Azure AI Search (Basic/Standard with Semantic Ranker) | Elasticsearch, Pinecone, Qdrant | Native integration with Azure OpenAI & SharePoint data sources, Integrated Vectorization pipeline. |
-| **Model Hosting** | Azure OpenAI Service (`gpt-4o`, `text-embedding-3-small`) | Self-hosted vLLM on VMs, OpenAI public API | Enterprise compliance, private networking, data residency, managed SLA. |
-| **State / Job Tracking** | Azure Table Storage | Cosmos DB, Azure SQL, Redis | Extremely low cost, key-value schema perfect for PartitionKey/RowKey job status lookups. |
-| **Identity & Access** | Microsoft Entra ID (Managed Identities) | API Keys, SAS tokens in code | Zero-secret footprint, role-based access control (RBAC). |
-| **Observability** | Azure Application Insights & Log Analytics | Datadog, Prometheus/Grafana | Out-of-the-box distributed tracing across Functions, Container Apps, and Azure SDKs. |
-| **Frontend Hosting** | Azure Static Web Apps | Storage Static Websites, Nginx on Container Apps | Global CDN distribution, automated preview environments, native Entra authentication integration. |
+ה-Worker יוצר ומתחזק index, datasource, skillset ו-indexer. Document Intelligence מחלץ טקסט לפי layout; הטקסט נחלק למקטעים, וכל מקטע מקבל embedding של 1536 ממדים. המטא-דאטה כולל `chunkId`, `parentDocumentId`, `fileName`, `content`, `page`, `sourceUrl` ו-`text_vector`.
 
----
+ה-indexer הוא משאב משותף ולכן ה-Worker מסדר הפעלות וממתין לסיום אמיתי. הוא בודק גם failures ברמת הפריט; הצלחת קריאת API בלבד אינה נחשבת הצלחת עבודה.
 
-## 3. Cost Modeling (Requirement 3.5 & 1.10)
+## בחירות תכנון
 
-### Baseline Load (5,000 PDFs, 200 Chat Sessions/Day)
-* **Storage & Operations**: ~$1 - $5/mo
-* **Azure AI Search (Basic/Standard S1)**: ~$75 - $250/mo
-* **Azure OpenAI (Tokens for Embeddings & Chat)**: ~$15 - $40/mo
-* **Compute (Container Apps & Functions Consumption)**: ~$10 - $30/mo
-* **Total Estimated Cost**: ~$100 - $350/month
+| בחירה | הסיבה |
+|---|---|
+| Container Apps ל-API | מתאים ל-FastAPI ול-SSE, container קבוע ו-scale מנוהל |
+| Functions ל-Worker | Queue trigger טבעי ותשלום לפי שימוש |
+| Storage Queue | תור זול ופשוט לעבודה אסינכרונית; הפעולות idempotent |
+| Table Storage | state קטן לפי מפתחות, ללא צורך במסד רלציוני |
+| AI Search | חיפוש היברידי, semantic ranking ואינטגרציה עם Azure OpenAI |
+| Blob במקום SharePoint כרגע | מאפשר מערכת מלאה וממשק החלפה ברור; Graph ו-ACL trimming טרם נוספו |
+| אישור בצד השרת | מונע מה-LLM או מהלקוח לבצע מחיקה ללא החלטת משתמש תקפה |
 
-### Scale Factor (100x Scale: 500,000 PDFs, 20,000 Sessions/Day)
-* **What breaks first**: Azure AI Search storage partitions/indexer throughput limits; OpenAI TPM (Tokens Per Minute) throttling.
-* **Architecture adjustments**: Partitioned search indexes, provisioned throughput (PTU) for OpenAI, dedicated Service Bus queues with partition keys.
+## אבטחה ובידוד
 
----
+- ה-backend מאמת issuer, audience, scope וחתימה מול JWKS של Entra ID.
+- היסטוריית שיחה נבדקת מול בעל השיחה; `conversationId` לבדו אינו מעניק גישה.
+- Managed Identities ו-RBAC משמשים לגישה ל-Azure.
+- הוראות מתוך PDF מטופלות כנתונים ולא כהוראות מערכת.
+- פעולות הרסניות מחייבות אישור קצר-חיים, חד-פעמי ומקושר למשתמש ולקובץ.
 
-## 4. Review Questions & Architectural Defenses (Requirement 06)
-1. **File updated 3 times in 10 seconds**: ETag/version check handles deduplication; intermediate versions are skipped if superseded before processing.
-2. **Trigger path down for 2 hours**: On-demand / scheduled delta catch-up runs reconcile the library state against the search index.
-3. **400-page PDF deleted**: Azure AI Search documents tagged with `ParentDocumentID` are purged in bulk using an OData filter.
-4. **Prompt injection in PDF**: Strict tool schema validation and separation between retrieval context and agent instruction blocks.
+## קנה מידה ועלות
 
----
+לתרחיש קטן של אלפי PDF ומאות שיחות ביום, רכיב העלות הקבוע העיקרי הוא Azure AI Search; האחסון, Queue/Table וה-Functions זולים יחסית, ועלות OpenAI תלויה בכמות הטוקנים. בקנה מידה גדול, צווארי הבקבוק הראשונים צפויים להיות קיבולת/קצב האינדקס, מגבלות TPM של OpenAI וה-indexer המשותף. מעבר למספר partitions, קיבולת מודל גבוהה יותר ותזמון ingestion מפוצל יהיה נדרש לפני גידול של פי 100.
 
-## 5. Azure AI Search Pipeline Strategy (Simplified Breakdown)
-
-כל מה שמתבצע בחיפוש (Azure AI Search) מסתכם ב-4 צעדים טכניים ברורים:
-
-* **צעד 1: חיתוך (Chunking)**
-  * **מה בוצע:** המערכת חותכת את ה-PDF למקטעים של **400–600 טוקנים** עם חפיפה של **50–100 טוקנים** (~10%–15%) (`SplitSkill`).
-  * **למה?** מדידה בטוקנים מדויקת הנדסית (במיוחד בעברית) ומונעת קטיעה סמנטית של משפטים בין סעיפים ותנאים כבולים.
-
-* **צעד 2: הפיכה למספרים (Embedding)**
-  * **מה בוצע:** שולחים כל מקטע למודל `text-embedding-3-small` ב-Azure OpenAI ומקבלים וקטור של 1,536 ממדים (`AzureOpenAIEmbeddingSkill`).
-  * **למה?** כי הוא זול, תומך בעברית, ומספק יחס עלות-תועלת אופטימלי בדרישות התקציב.
-
-* **צעד 3: זיהוי ומחיקה מלאה (Document Identity & Metadata)**
-  * **מה בוצע:** לכל מקטע מצמידים מזהה אב יציב (`ParentDocumentID`) הילוט מול קובץ ה-Source ב-**Azure Blob Storage**.
-  * **למה?** כשהקובץ נמחק או מוחלף ב-Blob Storage, ה-Worker מאתר את כל ה-Chunks המשויכים לאותו `ParentDocumentID` ומוחק אותם מהאינדקס באופן מלא ואידמפוטנטי בלי שאריות.
-
-* **צעד 4: חיפוש משולב (Hybrid Search & Reranking)**
-  * **מה בוצע:** מחפשים גם לפי מילים מדויקות (BM25) וגם לפי משמעות סמנטית (וקטור), ומריצים Semantic Reranker.
-  * **למה?** כי אם מחפשים מק"ט כמו `R-2048`, חיפוש לפי משמעות עלול להתבלבל עם `R-2049`, אבל חיפוש מילים יפגע בול.
-
+ראו [LIMITATIONS.md](LIMITATIONS.md) לפרטים על הפערים שנותרו.

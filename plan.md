@@ -24,3 +24,4 @@
 * [ ] **4.1 Dead Letter Queue (DLQ)**: Add robust error handling to route unrecoverable or poison messages to the Dead Letter Queue (`{queue}-poison`) after max dequeue retries, updating job status to `FAILED`.
 * [ ] **4.2 Run Reporting**: Generate structured execution logs and summary reports at the end of each worker batch (recording counts for indexed, skipped, and failed files).
 * [ ] **4.3 Reconciliation & Backfill**: Write a scheduled/on-demand utility function to perform a full library backfill and reconcile discrepancies between Blob Storage and the search index.
+> **מסמך היסטורי.** זו תכנית העבודה המקורית ואינה משקפת את מצב המימוש. הרכיבים המפורטים כאן הושלמו או השתנו. למצב הנוכחי ראו [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md) ו-[SUMMARY.md](SUMMARY.md).

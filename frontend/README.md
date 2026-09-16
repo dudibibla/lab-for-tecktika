@@ -1,3 +1,7 @@
+> **Current status (2026-09-16): implemented, tested and deployed.** The dev
+> environment uses Azure Blob Storage behind the API; direct SharePoint/Graph
+> integration remains future work. The backend contract is live, and historical
+> open questions in [API.md](API.md) are superseded by its current-status note.
 # lab-for-tecktika
 
 AI Agent Chat — a React + TypeScript front end for querying a SharePoint PDF

@@ -70,3 +70,4 @@
 4. **שלב 3:** בניית מנוע הסוכן (`runner.py`) והנחיות ה-Prompt.
 5. **שלב 4:** מימוש Endpoint צ'אט חי ב-SSE (`api/v1/endpoints/chat.py`).
 6. **שלב 5:** אימות משתמשים (כולל Dev Bypass מקומי), טלמטריה וטיפול ב-Conflict.
+> **מסמך היסטורי.** תמונת מצב זו נכתבה בתחילת פיתוח ה-backend וכבר אינה נכונה. אין להשתמש באחוזי המוכנות, ברשימת הקבצים החסרים או ב-`gpt-4o` שמתוארים בה. למצב הנוכחי ראו [README.md](README.md), [ARCHITECTURE.md](ARCHITECTURE.md) ו-[SUMMARY.md](SUMMARY.md).

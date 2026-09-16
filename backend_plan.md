@@ -146,3 +146,4 @@
    * וידוא שהודעות ה-Queue וה-Table המיוצרות ב-`job_manager.py` תואמות 1-ל-1 את מודלי ה-Worker ב-`feature/worker-pipeline`.
 3. **בדיקת בריאות כוללת של השרת:**
    * הרצת FastAPI ב-Uvicorn מקומית ווידוא שכל ה-Endpoints עולים ללא חריגות.
+> **מסמך היסטורי.** זו תכנית טרום-מימוש; תיבות לא מסומנות אינן backlog נוכחי. ה-backend, הסוכן, האימות וה-SSE ממומשים. למצב העדכני ראו [README.md](README.md) ו-[SUMMARY.md](SUMMARY.md).

@@ -1,3 +1,11 @@
+> **Implementation status (2026-09-16): closed and implemented.** The historical
+> `OPEN` labels below are preserved to explain the design process. The live backend
+> validates Entra bearer tokens, streams SSE, persists history and confirmations,
+> returns job IDs, and exposes job status. Conversation discovery remains local to
+> the browser because there is no server endpoint that lists a user's threads.
+> FastAPI HTTP errors use `detail`; stream failures use an SSE error event. A
+> successful ingestion job means indexing finished and the document is searchable;
+> a successful delete means the Blob and its indexed chunks were removed.
 # Frontend ↔ Backend contract
 
 **Client owner:** David (took over from Shmuel, 2026-09-06) · **Server owner:** _(you)_

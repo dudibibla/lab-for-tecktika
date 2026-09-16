@@ -1,21 +1,46 @@
-# Limitations & Future Roadmap
+# מגבלות ידועות
 
-## 1. Current Stubbed Features (Permitted Under Constraints)
-* **OCR for Scanned PDFs**: Document processing currently assumes text-based PDFs. Optical Character Recognition (Azure AI Document Intelligence) is abstracted behind an interface.
-* **Non-PDF File Formats**: Office documents (`.docx`, `.pptx`) and plain text formats can be ingested via the same seam, but only `.pdf` validation is active in the primary pipeline.
-* **Permission Trimming**: Document-level ACLs from SharePoint are not trimmed during hybrid search; all authenticated users with platform access query the single library index.
-* **Multi-Tenant / Multi-Library Support**: Designed as single-tenant scoped to a single document library.
+המערכת פעילה, אך הנקודות הבאות עדיין דורשות טיפול לפני שימוש ארגוני רחב.
 
----
+## מקור המסמכים והרשאות
 
-## 2. Behavior Under Extreme Load & Bottlenecks
-* **Azure OpenAI TPM/RPM Throttling**: Under simultaneous batch backfill and high user chat volume, OpenAI may return HTTP 429. Mitigation requires exponential retry backoff and/or provisioned throughput (PTU).
-* **Search Indexer Execution Queue**: Concurrent ingestion triggers serialize on the indexer schedule unless push-API indexing is enabled.
-* **File Size Thresholds**: Direct browser uploads over 50 MB use chunked Blob/SharePoint upload sessions; connection drops require client-side resumable upload logic.
+- סביבת `dev` משתמשת ב-Azure Blob Storage כספריית המסמכים. אין עדיין סנכרון ישיר מ-SharePoint דרך Microsoft Graph.
+- הרשאות SharePoint אינן עוברות ל-AI Search. כל משתמש מורשה באפליקציה מחפש כרגע באותה ספרייה.
+- אין עדיין reconciliation תקופתי מול מקור חיצוני; כל שינוי אמור לעבור דרך האפליקציה והתור.
 
----
+## מסמכים וחילוץ
 
-## 3. Next Steps & Production Enhancements
-1. **Dynamic ACL Security Filters**: Inject user security group claims into OData filter queries in Azure AI Search.
-2. **Azure AI Document Intelligence Integration**: For the current scope, standard text parsing is utilized given the clean, text-native synthetic dataset. In production environments with uncontrolled input formats (e.g., scanned PDFs, complex tables, multi-column layouts), `Microsoft.Skills.Vision.DocumentIntelligenceSkill` should be integrated into the Azure AI Search Skillset.
-3. **Multi-Region Active-Passive Failover**: Geo-redundant storage and secondary AI Search replicas for business continuity.
+- רק PDF נתמך בזרימת ההעלאה.
+- Document Intelligence משפר מסמכים סרוקים ו-layout מורכב, אך OCR, כתב יד, טבלאות צפופות וסדר קריאה ב-RTL עלולים להיות לא מדויקים.
+- גבול ה-backend להעלאה ישירה הוא 50MB. ה-frontend יודע להעלות בבלוקים, אך קובץ גדול עדיין צורך זמן אינדוקס ועלול להגיע למגבלות השירות.
+- מספר עמוד שמופיע ב-citation תלוי במיפוי שמחזיר pipeline החילוץ; יש לאמת מסמכים עם מספור פנימי שונה ממספר עמוד ה-PDF.
+
+## חיפוש ותשובות
+
+- RAG משפר ביסוס אך אינו מבטיח תשובה נכונה. ניסוח עמום, OCR שגוי או מידע המפוזר על פני chunks רבים יכולים להביא ל-`ambiguous` או `insufficient`.
+- evidence adjudication מוסיף קריאת מודל ולכן גם latency ועלות. אם הקריאה נכשלת המערכת נוקטת תוצאה שמרנית.
+- התאמת שם קובץ חלקית פועלת רק כשיש מועמד ברור. שמות דומים מחייבים בחירת משתמש.
+- context של מסמך נשמר בשיחה, אך מעבר נושא לא מפורש עלול עדיין להשאיר filter צר מדי או לחייב חיפוש רחב נוסף.
+- אין eval suite עסקי גדול עם שאלות אמת לכל סוגי המסמכים; בדיקות היחידה מכסות התנהגות קוד, לא את כל איכות התשובות.
+
+## קנה מידה וזמינות
+
+- Azure AI Search וה-indexer המשותף הם צוואר בקבוק בעומס ingestion גבוה.
+- Azure OpenAI כפוף ל-TPM/RPM ויכול להחזיר 429. קיימים retry/backoff, אך בעומס ממושך התשובה תתעכב או תיכשל.
+- Storage Queue מספק at-least-once delivery; ה-Worker תוכנן ל-idempotency, אך ניטור dead-letter/poison messages עדיין חשוב.
+- תשתית `dev` אינה תכנון מלא של production: אין DR רב-אזורי, private endpoints מלאים או SLA אפליקטיבי.
+
+## חוויית משתמש ותפעול
+
+- רשימת השיחות נשמרת בדפדפן, בעוד תוכן השיחה נשמר בשרת לפי `conversationId`. ניקוי browser storage יכול להסתיר שיחה קיימת מה-sidebar בלי למחוק את רשומת השרת.
+- מחיקת conversation מה-sidebar אינה מחיקת retention מלאה מכל מערכות השרת.
+- סטטוס `SUCCEEDED` אומר שהעבודה הסתיימה ונבדקה מול indexer; עדיין תיתכן השהיה קצרה או cache בצד לקוח.
+- הודעות שגיאה טכניות מסוימות עדיין יכולות להגיע באנגלית.
+
+## צעדים מומלצים
+
+1. להוסיף SharePoint/Graph connector, delta sync ו-ACL trimming.
+2. ליצור evaluation set קבוע בעברית למדדי retrieval, דיוק תשובה ו-citation.
+3. להוסיף reconciliation מתוזמן, poison-queue monitoring ומדדי latency/429.
+4. להגדיר retention מפורש לשיחות, jobs וקבצים זמניים.
+5. לבצע load test ולתכנן search partitions וקיבולת OpenAI לפי העומס האמיתי.

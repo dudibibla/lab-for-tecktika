@@ -1,7 +1,14 @@
 # Replacing built-in document cracking with Document Intelligence
 
-Status: **proposed, not implemented.** Raised 2026-09-09 after a wrong answer
-traced to text extraction, mitigated in the prompt as a stopgap.
+Status: **implemented and deployed.** The migration was proposed on 2026-09-09 and
+then completed. The worker now provisions and uses Document Intelligence Layout
+through the Azure AI Search skillset. Follow-up fixes corrected the skill output
+mapping to `content`, connected the billing resource, and made item-level indexer
+failures fail the job with their real details.
+
+The sections below preserve the original investigation and design reasoning.
+References to "proposed", "today", or an unmodified built-in cracking pipeline
+describe the state before the migration.
 
 ## The problem, with evidence
 

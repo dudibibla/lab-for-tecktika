@@ -1,131 +1,153 @@
 # SharePoint RAG & Agent Platform
 
-![Azure](https://img.shields.io/badge/Azure-0078D4?logo=microsoftazure&logoColor=white)
-![Bicep](https://img.shields.io/badge/IaC-Bicep-00A4EF)
-![FastAPI](https://img.shields.io/badge/Backend-FastAPI-009688?logo=fastapi&logoColor=white)
-![React](https://img.shields.io/badge/Frontend-React-61DAFB?logo=react&logoColor=black)
-![Azure Functions](https://img.shields.io/badge/Worker-Azure%20Functions-0062AD?logo=azurefunctions&logoColor=white)
-![License](https://img.shields.io/badge/status-in%20progress-yellow)
+מערכת צ'אט למסמכי PDF, עם חיפוש RAG, מקורות ברמת עמוד, העלאה/החלפה/מחיקה בשפה טבעית ועבודות רקע אסינכרוניות ב-Azure.
 
-An agent that indexes a document library into Azure AI Search and lets users **add, replace, and delete files through conversation** — with citations, background jobs, and no manual re-indexing step.
+> מצב נכון ל-16 בספטמבר 2026: המערכת ממומשת, נבדקה מקומית ונפרסה לסביבת `dev`. בסביבה הנוכחית Azure Blob Storage משמש כספריית המסמכים. חיבור ישיר ל-SharePoint/Graph נשאר שלב עתידי.
 
-Take-home exercise. See [`docs/EXERCISE_REQUIREMENTS.md`](docs/EXERCISE_REQUIREMENTS.md) for the brief, [`ARCHITECTURE.md`](ARCHITECTURE.md) for the design and cost model, and [`plan.md`](plan.md) for the ingestion pipeline task breakdown.
+## מה המערכת יודעת לעשות
 
----
+- כניסה באמצעות Microsoft Entra ID.
+- העלאת PDF, כולל העלאה בבלוקים לקבצים גדולים.
+- אינדוקס ברקע באמצעות Azure Functions, Document Intelligence ו-Azure AI Search.
+- חיפוש היברידי: מילות מפתח, וקטורים ו-Semantic Ranker.
+- תשובות זורמות (SSE) עם שם מסמך, עמוד וקישור למקור.
+- שמירת הקשר של מסמך בין שאלות המשך.
+- בדיקת ראיות לפני תשובה: תשובה ברורה, הצגת כמה אפשרויות במקרה של עמימות, או הודעה שאין מספיק מידע.
+- רשימת מסמכים, החלפת מסמך ומחיקתו מתוך הצ'אט.
+- אישור מפורש לפני פעולה הרסנית, עם התאמה לשם הקובץ הקנוני ב-Blob Storage.
+- מעקב אחר עבודות `QUEUED`, `RUNNING`, `SUCCEEDED` ו-`FAILED`.
 
-## Contents
-
-- [Architecture at a glance](#architecture-at-a-glance)
-- [Repository layout](#repository-layout)
-- [Build status](#build-status)
-- [Assumptions](#assumptions)
-- [Getting the cloud environment running](#getting-the-cloud-environment-running-infrastructure)
-- [Running the backend / worker / frontend](#running-the-backend--worker--frontend)
-- [Cost, alternatives, and review-question answers](#cost-alternatives-and-review-question-answers)
-
----
-
-## Architecture at a glance
+## ארכיטקטורה
 
 ```mermaid
-flowchart TD
-    User["User Browser"] --> ReactApp["React Frontend (Static Web App)"]
-    ReactApp -->|Stream Chat / Trigger Job| FastAPI["FastAPI Agent (Container App)"]
-    FastAPI -->|Retrieval| AISearch["Azure AI Search"]
-    FastAPI -->|LLM Reasoning| OpenAI["Azure OpenAI (gpt-4o / embeddings)"]
-    FastAPI -->|Enqueue Job| Queue["Storage Queue"]
-    FastAPI -->|Set Status: QUEUED| Table["Table Storage (job state)"]
-    Queue -->|Trigger| Worker["Azure Functions Worker"]
-    Worker -->|ETag Check / Fetch| Blob["Blob Storage (document library)"]
-    Worker -->|Index / Delete Chunks| AISearch
-    Worker -->|Update Status| Table
-    ReactApp -.->|Poll Status| Table
+flowchart LR
+    Browser[React SPA<br/>Azure Static Web Apps] -->|JWT + HTTPS| API[FastAPI<br/>Azure Container Apps]
+    API -->|Chat| AOAI[Azure OpenAI<br/>gpt-5-mini]
+    API -->|Hybrid retrieval| Search[Azure AI Search]
+    API -->|Upload / list| Blob[Blob Storage<br/>pdf-library]
+    API -->|Jobs| Queue[Storage Queue<br/>index-jobs]
+    API -->|History / confirmations / status| Table[Table Storage]
+    Queue --> Worker[Azure Functions Worker]
+    Worker --> Blob
+    Worker --> DI[Document Intelligence]
+    Worker --> Search
+    Worker --> Table
 ```
 
-Full justification for every resource choice (and the alternatives rejected) lives in [`ARCHITECTURE.md`](ARCHITECTURE.md).
+זרימת כתיבה היא אסינכרונית: ה-API יוצר עבודה ומחזיר מיד; ה-Worker קורא את ה-PDF, מעדכן את האינדקס ורק אז מסמן את העבודה כהצלחה. מחיקה והחלפה מחייבות אישור משתמש לפני יצירת העבודה.
 
-## Repository layout
+פירוט נוסף נמצא ב-[ARCHITECTURE.md](ARCHITECTURE.md). מגבלות ידועות נמצאות ב-[LIMITATIONS.md](LIMITATIONS.md).
 
-| Path | Contents |
+## מצב הרכיבים
+
+| רכיב | מצב |
 |---|---|
-| [`infrastructure/`](infrastructure/) | Bicep IaC for every Azure resource — reproducible from an empty resource group |
-| [`backend/`](backend/) | FastAPI agent service (chat, tool calls, job orchestration) |
-| [`worker/`](worker/) | Azure Functions queue worker (indexing, deletion, job state) |
-| [`frontend/`](frontend/) | React chat UI |
-| [`docs/`](docs/) | Exercise brief |
+| תשתית Bicep | פרוסה ב-`rg-sharepoint-rag-dev` |
+| Backend FastAPI | ממומש ופרוס ב-Azure Container Apps |
+| Worker | ממומש ופרוס ב-Azure Functions |
+| Frontend React | ממומש ופרוס ב-Azure Static Web Apps |
+| אימות והרשאות | Entra ID + Managed Identities/RBAC |
+| CI/CD | workflows נפרדים לתשתית, backend, worker ו-frontend |
+| בדיקות backend | 143 בדיקות עוברות בבדיקה האחרונה |
 
-## Build status
+כתובות סביבת `dev`:
 
-| Layer | Status |
+- Frontend: `https://delightful-river-0f09b360f.5.azurestaticapps.net`
+- Backend: `https://ca-backend-ragpoc-dev-qelri355pi.redrock-32afe15c.swedencentral.azurecontainerapps.io`
+- Repository: `https://github.com/dudibibla/lab-for-tecktika.git`
+
+## שירותים והגדרות עיקריות
+
+| שימוש | הגדרה נוכחית |
 |---|---|
-| Infrastructure (Bicep) | ✅ Deployed and verified live in Azure (`rg-sharepoint-rag-dev`) |
-| Infra CI/CD (`deploy-infra.yml`) | ✅ Verified end to end: OIDC login → deploy → outputs, no stored secrets |
-| Backend (FastAPI agent) | 🚧 Scaffolded, not yet implemented |
-| Worker (Azure Functions) | 🚧 Scaffolded, not yet implemented |
-| Frontend (React) | 🚧 Scaffolded, not yet implemented |
-| App-level CI/CD | 🚧 Workflow files exist, not yet implemented |
+| מודל שיחה | `gpt-5-mini` |
+| Embeddings | `text-embedding-3-small` (1536 ממדים) |
+| OpenAI API version | `2025-04-01-preview` |
+| Search index | `pdf-chunks-index` |
+| Semantic configuration | `document-content-semantic` |
+| Blob container | `pdf-library` |
+| Queue | `index-jobs` |
+| Job table | `jobstatus` |
 
-## Assumptions
+## מבנה המאגר
 
-- **Source of truth**: the brief specifies SharePoint, but a real SharePoint document library and Graph API integration is out of scope for the timebox. Azure Blob Storage stands in behind the same interface the worker and search indexer consume (`worker/services/blob_client.py`), so swapping in a real SharePoint connector later only touches that seam. This is the "document library" referred to everywhere else in this README.
-- **Compute**: the backend runs on Azure Container Apps (not App Service) — see the alternatives comparison in `ARCHITECTURE.md`.
-- **Triggering**: file changes are driven by the agent's own actions (add/replace/delete requests enqueue a job directly), not by a Blob-change event grid. The backend is the only writer to the document store, so this covers the required freshness/triggering behavior without an extra eventing layer.
-- **Region**: `swedencentral` by default (set in `infrastructure/main.bicepparam`) — pick any region with Azure OpenAI model capacity for your subscription.
+| נתיב | תוכן |
+|---|---|
+| `infrastructure/` | Bicep וסקריפטים להקמת Azure ו-Entra ID |
+| `backend/` | FastAPI, סוכן, RAG, אישורים, היסטוריה וניהול עבודות |
+| `worker/` | Queue Trigger, Document Intelligence וניהול Azure AI Search |
+| `frontend/` | React/Vite, MSAL, צ'אט, העלאה, אישורים ומעקב עבודות |
+| `docs/` | דרישות המקור ותיעוד המעבר ל-Document Intelligence |
 
-## Getting the cloud environment running (Infrastructure)
+## הרצה מקומית
 
-Everything in Azure is defined as code under [`infrastructure/`](infrastructure/) and is reproducible from an empty resource group.
+דרישות: Python 3.11, Node.js 20, Azure CLI, Azure Functions Core Tools והרשאות למשאבי Azure המתאימים. העתיקו את קובצי ה-`.env.example` והשלימו ערכים מקומיים; אין להכניס סודות ל-Git.
 
-**Prerequisites**: an Azure subscription and [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) with the Bicep extension (`az bicep install`). `register-github-oidc.sh` additionally wants `jq` or `python`/`python3` on `PATH` to resolve GitHub's repo ID for the OIDC subject (see gotchas below) — falls back to a warning and the plain slug if neither is found.
+Backend:
 
-```bash
-az login
-az account set --subscription "<your-subscription-id>"
-
-cd infrastructure/scripts
-chmod +x deploy.sh register-entra-app.sh
-./deploy.sh rg-ragpoc-dev swedencentral
+```powershell
+cd backend
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+uvicorn app.main:app --reload --port 8000
 ```
 
-This provisions, in order: Log Analytics + Application Insights, the storage account (blob container / queue / table), Azure AI Search, Azure OpenAI (`gpt-4o` + `text-embedding-3-small` deployments), the Container Apps environment + backend Container App (placeholder image until CI/CD pushes a real one), the Function App for the worker, and a Static Web App for the frontend. It also wires RBAC role assignments so the backend, worker, and search service authenticate to each other with managed identities — no connection strings or API keys anywhere.
+Frontend:
 
-At the end it writes `infrastructure/scripts/.generated.env` (gitignored) with the endpoints/names each app layer needs.
-
-To wire up sign-in:
-
-```bash
-./register-entra-app.sh ragpoc-dev https://<your-static-web-app-hostname> http://localhost:5173
+```powershell
+cd frontend
+npm ci
+npm run dev
 ```
 
-Then set the printed `entraTenantId` / `entraApiClientId` in `infrastructure/main.bicepparam` and re-run `deploy.sh` so the backend picks them up. (`main.bicepparam` currently commits the team's shared dev values for `rg-sharepoint-rag-dev` — if you're standing up a *separate* environment, run `register-entra-app.sh` yourself and use your own output instead of reusing these.)
+Worker:
 
-To tear everything down: `az group delete --name rg-ragpoc-dev`.
-
-### Gotchas hit deploying this for real (not just compiling)
-
-Bicep compiling cleanly says nothing about whether Azure will actually accept it — these only surfaced once we deployed against a live subscription:
-
-- **Model SKU ≠ portable across regions/subscriptions.** `gpt-4o` on `GlobalStandard` had 0 quota on a fresh subscription (`Standard` had default quota instead); `text-embedding-3-small` doesn't support `Standard` at all in `swedencentral` (only `GlobalStandard`/`DataZoneStandard`). Check `az cognitiveservices usage list --location <region>` before assuming a SKU is available.
-- **Static Web Apps only deploys to a short region list** (`centralus`, `eastus2`, `westus2`, `westeurope`, `eastasia` as of writing) — and even one of those can be temporarily closed to new customers. It needs its own location param, separate from everything else.
-- **Container App names cap at 32 characters.** A `baseName` that's fine for every other resource type can silently overflow once you prefix it with something like `ca-backend-`.
-- **GitHub's OIDC subject claim uses immutable IDs, not the slug**: `repo:<owner>@<ownerId>/<repo>@<repoId>:...`, not `repo:<owner>/<repo>:...`. A federated credential registered with the plain slug fails in CI with `AADSTS700213: No matching federated identity record` even though every value looks correct. `register-github-oidc.sh` resolves the real IDs via the GitHub API now.
-- **A just-created service principal isn't immediately usable.** Assigning it a role right after `az ad sp create` can fail with `PrincipalNotFound` for ~20s while Entra ID replicates — looks identical to a permissions problem. `register-github-oidc.sh` retries instead of failing.
-- **On Windows, `python3` may not be Python.** Plain Git-for-Windows Git Bash resolves `python3` to the Microsoft Store app-execution-alias stub (exists on `PATH`, does nothing, exits code 49), while `python` is the real interpreter. `command -v` can't tell them apart — only running it and checking output can.
-
-### Enabling automatic deploys from GitHub Actions
-
-`deploy-infra.yml` logs into Azure via OIDC (no client secret ever generated or stored). Wire it up once:
-
-```bash
-./register-github-oidc.sh <your-github-owner>/<your-repo> rg-ragpoc-dev swedencentral dev
+```powershell
+cd worker
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+func start
 ```
 
-This creates a dedicated app registration + federated credential trusting this repo, and grants it `Contributor` + `Role Based Access Control Administrator` scoped to just that resource group (not the whole subscription). It prints the three values to add as GitHub Actions secrets (`AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID`) plus the `AZURE_RESOURCE_GROUP` repo variable — and the `gh` CLI commands to set them directly if you have it authenticated. It also expects a GitHub environment named `dev` to exist (Settings → Environments).
+## בדיקות
 
-## Running the backend / worker / frontend
+```powershell
+cd backend
+python -m pytest tests -q
 
-Local dev and app-level setup for each service lives in its own folder (`backend/`, `worker/`, `frontend/`) and is still in progress — see each folder's `.env.example` for the configuration it expects once implemented, and `docker-compose.local.yml` for local Azurite emulation.
+cd ..\worker
+python -m pytest tests -q
 
-## Cost, alternatives, and review-question answers
+cd ..\frontend
+npm ci
+npm run lint
+npm test
+npm run build
+```
 
-See [`ARCHITECTURE.md`](ARCHITECTURE.md) (resource justification + cost model) and [`LIMITATIONS.md`](LIMITATIONS.md) (what's stubbed, what breaks under load, next steps).
+## פריסה
+
+Push ל-`main` מפעיל workflow לפי הנתיבים שהשתנו:
+
+- `.github/workflows/deploy-infra.yml` — תשתית Bicep דרך OIDC.
+- `.github/workflows/ci-backend.yml` — בדיקות, image ב-GHCR ועדכון Container App.
+- `.github/workflows/ci-worker.yml` — בדיקות, vendoring בתוך image תואם Azure Functions ופריסה.
+- `.github/workflows/ci-frontend.yml` — lint, בדיקות, build ופריסה ל-Static Web Apps.
+
+הערות תפעול חשובות:
+
+- פריסת תשתית משמרת את `WEBSITE_RUN_FROM_PACKAGE`; מחיקתו משביתה את ה-Worker.
+- ל-Container App נדרש credential מפורש ל-GHCR גם אם החבילה נראית ציבורית.
+- משתני Entra ריקים אינם אמורים לדרוס את הגדרות האימות הקיימות.
+- `SUCCEEDED` פירושו שהאינדקס סיים והמסמך זמין לחיפוש, או שהמחיקה הושלמה.
+
+## מסמכי פרויקט
+
+- [ARCHITECTURE.md](ARCHITECTURE.md) — המבנה הנוכחי והחלטות התכנון.
+- [SUMMARY.md](SUMMARY.md) — סיכום התפתחות, תקלות ופתרונות.
+- [LIMITATIONS.md](LIMITATIONS.md) — מגבלות וסיכונים שנותרו.
+- [frontend/API.md](frontend/API.md) — חוזה ה-API בין ה-frontend ל-backend.
+- [docs/EXERCISE_REQUIREMENTS.md](docs/EXERCISE_REQUIREMENTS.md) — דרישות המטלה המקוריות.
+- `plan.md`, `backend_plan.md`, `backend_context.md` — מסמכי תכנון היסטוריים, לא מקור למצב הנוכחי.
