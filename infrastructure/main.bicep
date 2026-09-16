@@ -59,6 +59,13 @@ param entraTenantId string = ''
 @description('Entra ID API app registration client ID exposed by the backend.')
 param entraApiClientId string = ''
 
+@description('GHCR username for pulling the backend image. Only needed when the package is private.')
+param ghcrUsername string = ''
+
+@description('GHCR PAT (read:packages) for pulling the backend image. Only needed when the package is private.')
+@secure()
+param ghcrPassword string = ''
+
 var baseName = '${projectName}-${environmentName}-${uniqueString(resourceGroup().id)}'
 
 module monitoring 'modules/monitoring.bicep' = {
@@ -134,6 +141,8 @@ module compute 'modules/compute.bicep' = {
     backendCorsAllowedOrigins: backendCorsAllowedOrigins
     entraTenantId: entraTenantId
     entraApiClientId: entraApiClientId
+    ghcrUsername: ghcrUsername
+    ghcrPassword: ghcrPassword
   }
 }
 

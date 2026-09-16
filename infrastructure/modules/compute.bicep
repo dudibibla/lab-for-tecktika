@@ -53,6 +53,13 @@ param documentIntelligenceEndpoint string
 @description('Placeholder container image for the backend Container App. CI/CD replaces this with the built image after the first deploy.')
 param backendContainerImage string = 'mcr.microsoft.com/k8se/quickstart:latest'
 
+@description('GHCR username for pulling the backend image. Only needed when the package is private - leave empty for a public package (anonymous pull).')
+param ghcrUsername string = ''
+
+@description('GHCR PAT (read:packages) for pulling the backend image. Only needed when the package is private.')
+@secure()
+param ghcrPassword string = ''
+
 @description('Origins allowed to call the backend API cross-origin (the frontend\'s own hostname). Empty disables CORS on the backend.')
 param backendCorsAllowedOrigins array = []
 
@@ -100,8 +107,16 @@ resource backendApp 'Microsoft.App/containerApps@2024-03-01' = {
         transport: 'auto'
       }
       activeRevisionsMode: 'Single'
-      secrets: [
-        { name: 'appinsights-connection-string', value: appInsightsConnectionString }
+      secrets: concat(
+        [{ name: 'appinsights-connection-string', value: appInsightsConnectionString }],
+        empty(ghcrPassword) ? [] : [{ name: 'ghcr-pat', value: ghcrPassword }]
+      )
+      // GHCR packages linked to a repo don't reliably go public even when the
+      // UI says they do (observed live 2026-09-16, ghcr.io itself kept
+      // rejecting anonymous pulls); pulling with an explicit credential works
+      // regardless of the package's visibility state.
+      registries: empty(ghcrPassword) ? [] : [
+        { server: 'ghcr.io', username: ghcrUsername, passwordSecretRef: 'ghcr-pat' }
       ]
     }
     template: {

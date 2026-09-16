@@ -37,18 +37,30 @@ jobs:
       # a secret is actually set: an unset secret expands to an empty string,
       # which silently wiped AZURE_CLIENT_ID_API on the Container App and made
       # the backend return 503 on every authenticated request.
-      - name: Build optional Entra parameter overrides
+      - name: Build optional Entra/GHCR parameter overrides
         id: entra
         env:
           ENTRA_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           ENTRA_API_CLIENT_ID: ${{ secrets.ENTRA_API_CLIENT_ID }}
+          # The GHCR package backing the backend image doesn't reliably stay
+          # pullable anonymously even when set to Public (observed live
+          # 2026-09-16), so the Container App needs an explicit credential
+          # regardless of visibility. Without this, every infra redeploy fails
+          # provisioning the backend image ("DENIED: requested access ...").
+          GHCR_PAT: ${{ secrets.GHCR_PAT }}
         run: |
+          if [ -n "$GHCR_PAT" ]; then
+            echo "::add-mask::$GHCR_PAT"
+          fi
           overrides=""
           if [ -n "$ENTRA_TENANT_ID" ]; then
             overrides="$overrides entraTenantId=$ENTRA_TENANT_ID"
           fi
           if [ -n "$ENTRA_API_CLIENT_ID" ]; then
             overrides="$overrides entraApiClientId=$ENTRA_API_CLIENT_ID"
+          fi
+          if [ -n "$GHCR_PAT" ]; then
+            overrides="$overrides ghcrPassword=$GHCR_PAT"
           fi
           if [ -n "$overrides" ]; then
             overrides="--parameters$overrides"

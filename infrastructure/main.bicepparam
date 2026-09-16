@@ -38,6 +38,14 @@ param searchSkuName = 'basic'
 // redeploy outright ("DENIED: requested access to the resource is denied").
 param backendContainerImage = 'ghcr.io/dudibibla/lab-for-tecktika-backend:latest'
 
+// The lab-for-tecktika-backend GHCR package doesn't reliably stay pullable
+// anonymously even when its visibility is set to Public (observed live
+// 2026-09-16 - ghcr.io kept returning 401/403 to anonymous pulls regardless).
+// ghcrPassword (a PAT with read:packages, owned by this account) is supplied
+// at deploy time via deploy-infra.yml from the GHCR_PAT repo secret, not
+// hardcoded here.
+param ghcrUsername = 'dudibibla'
+
 // From register-entra-app.sh (Entra ID App Registration for user sign-in).
 param entraTenantId = '6fc8a795-8bcb-4e52-8b36-41c1971e6816'
 param entraApiClientId = '7267f8e7-50eb-4247-88b7-da2cc3adf6f6'
