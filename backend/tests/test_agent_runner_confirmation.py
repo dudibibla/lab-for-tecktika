@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -39,6 +40,10 @@ def test_delete_tool_creates_confirmation_event() -> None:
         patch(
             "app.agent.runner.create_chat_completion",
             return_value=response,
+        ),
+        patch(
+            "app.agent.runner.list_library_documents",
+            return_value=["Q3-report.pdf"],
         ),
         patch(
             "app.agent.runner.resolve_document",
@@ -124,6 +129,49 @@ def test_delete_prefers_exact_library_file_named_in_current_message() -> None:
     assert events[0].confirmation is not None
     assert events[0].confirmation.files == ["111.pdf"]
     assert create_confirmation.call_args.kwargs["blob_name"] == "111.pdf"
+
+
+def test_delete_uses_canonical_blob_name_for_equivalent_whitespace() -> None:
+    canonical_name = "lease agreement.pdf"
+    model_name = "lease\u00a0agreement.pdf"
+    tool_call = SimpleNamespace(
+        id="call_delete_unicode_spacing",
+        function=SimpleNamespace(
+            name="delete_document",
+            arguments=json.dumps({"file_name": model_name}),
+        ),
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        content=None,
+        tool_calls=[tool_call],
+    ))])
+    resolved = ResolvedDocument(
+        file_name=canonical_name,
+        blob_name=canonical_name,
+        document_id="doc_lease",
+        etag='"etag_lease"',
+    )
+
+    with (
+        patch("app.agent.runner.create_chat_completion", return_value=response),
+        patch(
+            "app.agent.runner.list_library_documents",
+            return_value=[canonical_name],
+        ),
+        patch("app.agent.runner.resolve_document", return_value=[resolved]) as resolve,
+        patch("app.agent.runner.confirmation_store.create") as create_confirmation,
+    ):
+        create_confirmation.return_value = SimpleNamespace(
+            confirmation_id="cf_delete_unicode",
+        )
+        events = list(stream_agent(
+            f"Delete {model_name}",
+            requested_by="conv_123",
+        ))
+
+    resolve.assert_called_once_with(canonical_name)
+    assert events[0].confirmation is not None
+    assert events[0].confirmation.files == [canonical_name]
 
 
 def test_delete_rejects_multiple_exact_library_files_in_current_message() -> None:
@@ -346,6 +394,10 @@ def test_delete_allowed_when_attachment_is_stale_not_fresh() -> None:
         patch(
             "app.agent.runner.create_chat_completion",
             return_value=response,
+        ),
+        patch(
+            "app.agent.runner.list_library_documents",
+            return_value=["Q3-report.pdf"],
         ),
         patch(
             "app.agent.runner.resolve_document",

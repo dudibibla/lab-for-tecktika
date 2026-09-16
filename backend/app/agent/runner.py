@@ -235,14 +235,6 @@ def _delete_file_name_from_current_message(
     Otherwise compare the message with the live library and correct the tool
     argument only when exactly one existing filename is stated verbatim.
     """
-    raw_message = unicodedata.normalize("NFKC", user_message).casefold()
-    raw_model_name = unicodedata.normalize("NFKC", model_file_name).casefold()
-    if re.search(
-        rf"(?<!\w){re.escape(raw_model_name)}(?!\w)",
-        raw_message,
-    ) and raw_model_name.endswith(".pdf"):
-        return model_file_name
-
     def normalize(value: str) -> str:
         value = unicodedata.normalize("NFKC", value).casefold()
         value = re.sub(r"\.pdf(?=\W|$)", "", value)
@@ -252,6 +244,9 @@ def _delete_file_name_from_current_message(
 
     normalized_message = normalize(user_message)
     normalized_model_name = normalize(model_file_name)
+    # Always return the canonical name read from Blob Storage. A name produced
+    # by the model can look identical while containing different Unicode or
+    # whitespace, which fails the resolver's intentionally exact comparison.
     library_names = list_library_documents()
 
     def phrase_is_in_message(phrase: str) -> bool:
