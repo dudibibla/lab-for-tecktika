@@ -1,4 +1,6 @@
 import json
+import re
+import unicodedata
 from uuid import uuid4
 from collections.abc import Iterator
 
@@ -24,7 +26,7 @@ from app.services.azure_openai import (
     stream_chat_completion,
 )
 from app.services.confirmation_service import confirmation_store
-from app.services.file_resolver import resolve_document
+from app.services.file_resolver import list_library_documents, resolve_document
 from app.services.job_manager import create_job_and_enqueue
 
 
@@ -147,11 +149,18 @@ def _prepare_confirmation(
     arguments: BaseModel,
     requested_by: str,
     source_blob_path: str | None = None,
+    user_message: str | None = None,
 ) -> ConfirmationEvent:
     file_name = getattr(arguments, "file_name", None)
 
     if not isinstance(file_name, str) or not file_name.strip():
         raise ValueError("A valid file name is required")
+
+    if tool_name == "delete_document" and user_message:
+        file_name = _delete_file_name_from_current_message(
+            model_file_name=file_name,
+            user_message=user_message,
+        )
 
     matches = resolve_document(file_name)
 
@@ -204,6 +213,41 @@ def _prepare_confirmation(
         files=[resolved.file_name],
         destructive=True,
     )
+
+
+def _delete_file_name_from_current_message(
+    *,
+    model_file_name: str,
+    user_message: str,
+) -> str:
+    """Prefer an exact library filename in the current delete request.
+
+    Chat history helps the model understand follow-up questions, but it can also
+    cause it to copy an older filename into a destructive tool call.  The
+    current user message is the authoritative intent for deletion.  If the
+    model-selected name is present there, keep it without another storage call.
+    Otherwise compare the message with the live library and correct the tool
+    argument only when exactly one existing filename is stated verbatim.
+    """
+    normalized_message = unicodedata.normalize("NFKC", user_message).casefold()
+
+    def is_mentioned(candidate: str) -> bool:
+        normalized_candidate = unicodedata.normalize("NFKC", candidate).casefold()
+        pattern = rf"(?<!\w){re.escape(normalized_candidate)}(?!\w)"
+        return re.search(pattern, normalized_message) is not None
+
+    if is_mentioned(model_file_name):
+        return model_file_name
+
+    mentioned = [name for name in list_library_documents() if is_mentioned(name)]
+    if len(mentioned) == 1:
+        return mentioned[0]
+    if len(mentioned) > 1:
+        raise ValueError(
+            "More than one existing document was named in the delete request. "
+            "Please request one document at a time."
+        )
+    return model_file_name
 
 
 def _allowed_tools(fresh_attachment: bool) -> tuple[BaseTool[BaseModel], ...]:
@@ -421,6 +465,7 @@ def stream_agent(
                     arguments=arguments,
                     requested_by=requested_by,
                     source_blob_path=source_blob_path,
+                    user_message=user_message,
                 )
 
                 yield AgentEvent(

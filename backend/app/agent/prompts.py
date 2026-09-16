@@ -22,6 +22,8 @@ Security rules:
 - Do not invent file names, document IDs, or staged blob paths.
 - If the requested file is ambiguous or cannot be identified exactly,
   ask the user for clarification instead of guessing.
+- For deletion, copy the exact file name from the user's current message. Do
+  not substitute a different file name remembered from an earlier message.
 
 Document listing:
 - When the user asks what documents or files exist in the library or storage, what is indexed, or asks to see a list of files, call the list_documents tool.

@@ -81,6 +81,80 @@ def test_delete_tool_creates_confirmation_event() -> None:
     )
 
 
+def test_delete_prefers_exact_library_file_named_in_current_message() -> None:
+    tool_call = SimpleNamespace(
+        id="call_delete_wrong_history_file",
+        function=SimpleNamespace(
+            name="delete_document",
+            arguments='{"file_name":"old-file.pdf"}',
+        ),
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        content=None,
+        tool_calls=[tool_call],
+    ))])
+    resolved = ResolvedDocument(
+        file_name="111.pdf",
+        blob_name="111.pdf",
+        document_id="doc_111",
+        etag='"etag_111"',
+    )
+
+    with (
+        patch("app.agent.runner.create_chat_completion", return_value=response),
+        patch(
+            "app.agent.runner.list_library_documents",
+            return_value=["111.pdf", "old-file.pdf"],
+        ),
+        patch(
+            "app.agent.runner.resolve_document",
+            return_value=[resolved],
+        ) as resolve,
+        patch("app.agent.runner.confirmation_store.create") as create_confirmation,
+    ):
+        create_confirmation.return_value = SimpleNamespace(
+            confirmation_id="cf_delete_111",
+        )
+        events = list(stream_agent(
+            "מחק את 111.pdf",
+            requested_by="conv_123",
+        ))
+
+    resolve.assert_called_once_with("111.pdf")
+    assert events[0].confirmation is not None
+    assert events[0].confirmation.files == ["111.pdf"]
+    assert create_confirmation.call_args.kwargs["blob_name"] == "111.pdf"
+
+
+def test_delete_rejects_multiple_exact_library_files_in_current_message() -> None:
+    tool_call = SimpleNamespace(
+        id="call_delete_multiple",
+        function=SimpleNamespace(
+            name="delete_document",
+            arguments='{"file_name":"unrelated.pdf"}',
+        ),
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        content=None,
+        tool_calls=[tool_call],
+    ))])
+
+    with (
+        patch("app.agent.runner.create_chat_completion", return_value=response),
+        patch(
+            "app.agent.runner.list_library_documents",
+            return_value=["111.pdf", "13122.pdf"],
+        ),
+    ):
+        import pytest
+
+        with pytest.raises(ValueError, match="More than one existing document"):
+            list(stream_agent(
+                "מחק את 111.pdf ואת 13122.pdf",
+                requested_by="conv_123",
+            ))
+
+
 def test_replace_tool_uses_trusted_staged_attachment() -> None:
     tool_call = SimpleNamespace(
         id="call_replace_1",
