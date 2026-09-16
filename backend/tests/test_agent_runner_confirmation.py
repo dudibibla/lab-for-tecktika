@@ -146,13 +146,91 @@ def test_delete_rejects_multiple_exact_library_files_in_current_message() -> Non
             return_value=["111.pdf", "13122.pdf"],
         ),
     ):
-        import pytest
+        events = list(stream_agent(
+            "מחק את 111.pdf ואת 13122.pdf",
+            requested_by="conv_123",
+        ))
 
-        with pytest.raises(ValueError, match="More than one existing document"):
-            list(stream_agent(
-                "מחק את 111.pdf ואת 13122.pdf",
-                requested_by="conv_123",
-            ))
+    assert len(events) == 1
+    assert events[0].type == "delta"
+    assert "111.pdf" in (events[0].delta or "")
+    assert "13122.pdf" in (events[0].delta or "")
+
+
+def test_delete_resolves_unique_file_when_pdf_extension_is_omitted() -> None:
+    tool_call = SimpleNamespace(
+        id="call_delete_without_extension",
+        function=SimpleNamespace(
+            name="delete_document",
+            arguments='{"file_name":"חוזה דירה תרגיל"}',
+        ),
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        content=None,
+        tool_calls=[tool_call],
+    ))])
+    resolved = ResolvedDocument(
+        file_name="חוזה דירה תרגיל.pdf",
+        blob_name="חוזה דירה תרגיל.pdf",
+        document_id="doc_lease",
+        etag='"etag_lease"',
+    )
+
+    with (
+        patch("app.agent.runner.create_chat_completion", return_value=response),
+        patch(
+            "app.agent.runner.list_library_documents",
+            return_value=["חוזה דירה תרגיל.pdf"],
+        ),
+        patch("app.agent.runner.resolve_document", return_value=[resolved]) as resolve,
+        patch("app.agent.runner.confirmation_store.create") as create_confirmation,
+    ):
+        create_confirmation.return_value = SimpleNamespace(
+            confirmation_id="cf_delete_lease",
+        )
+        events = list(stream_agent(
+            "מחק חוזה דירה תרגיל",
+            requested_by="conv_123",
+        ))
+
+    resolve.assert_called_once_with("חוזה דירה תרגיל.pdf")
+    assert events[0].confirmation is not None
+    assert events[0].confirmation.files == ["חוזה דירה תרגיל.pdf"]
+
+
+def test_delete_lists_ambiguous_partial_filename_candidates() -> None:
+    tool_call = SimpleNamespace(
+        id="call_delete_partial",
+        function=SimpleNamespace(
+            name="delete_document",
+            arguments='{"file_name":"אישור לימודים"}',
+        ),
+    )
+    response = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        content=None,
+        tool_calls=[tool_call],
+    ))])
+
+    with (
+        patch("app.agent.runner.create_chat_completion", return_value=response),
+        patch(
+            "app.agent.runner.list_library_documents",
+            return_value=[
+                "1125 אישור לימודים.pdf",
+                "אישור_לימודים_מתוקן (1).pdf",
+                "שטראוס אישור לימודים.pdf",
+            ],
+        ),
+    ):
+        events = list(stream_agent(
+            'מחק "אישור לימודים"',
+            requested_by="conv_123",
+        ))
+
+    assert len(events) == 1
+    assert events[0].type == "delta"
+    assert "1125 אישור לימודים.pdf" in (events[0].delta or "")
+    assert "שטראוס אישור לימודים.pdf" in (events[0].delta or "")
 
 
 def test_replace_tool_uses_trusted_staged_attachment() -> None:

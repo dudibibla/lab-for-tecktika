@@ -46,6 +46,12 @@ MAX_CITATIONS = 5
 AgentMessage = ChatCompletionMessageParam | ChatCompletionMessage
 
 
+class AmbiguousDocumentReference(ValueError):
+    def __init__(self, candidates: list[str]) -> None:
+        self.candidates = candidates
+        super().__init__("Document name is ambiguous")
+
+
 def _build_messages(
     user_message: str,
     history: list[ChatHistoryMessage] | None = None,
@@ -229,24 +235,57 @@ def _delete_file_name_from_current_message(
     Otherwise compare the message with the live library and correct the tool
     argument only when exactly one existing filename is stated verbatim.
     """
-    normalized_message = unicodedata.normalize("NFKC", user_message).casefold()
-
-    def is_mentioned(candidate: str) -> bool:
-        normalized_candidate = unicodedata.normalize("NFKC", candidate).casefold()
-        pattern = rf"(?<!\w){re.escape(normalized_candidate)}(?!\w)"
-        return re.search(pattern, normalized_message) is not None
-
-    if is_mentioned(model_file_name):
+    raw_message = unicodedata.normalize("NFKC", user_message).casefold()
+    raw_model_name = unicodedata.normalize("NFKC", model_file_name).casefold()
+    if re.search(
+        rf"(?<!\w){re.escape(raw_model_name)}(?!\w)",
+        raw_message,
+    ) and raw_model_name.endswith(".pdf"):
         return model_file_name
 
-    mentioned = [name for name in list_library_documents() if is_mentioned(name)]
+    def normalize(value: str) -> str:
+        value = unicodedata.normalize("NFKC", value).casefold()
+        value = re.sub(r"\.pdf(?=\W|$)", "", value)
+        value = value.replace("_", " ")
+        value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+        return " ".join(value.split())
+
+    normalized_message = normalize(user_message)
+    normalized_model_name = normalize(model_file_name)
+    library_names = list_library_documents()
+
+    def phrase_is_in_message(phrase: str) -> bool:
+        pattern = rf"(?<!\w){re.escape(phrase)}(?!\w)"
+        return bool(phrase) and re.search(pattern, normalized_message) is not None
+
+    # First prefer complete library filenames (or their exact stem without the
+    # .pdf extension) that the user typed in this turn.
+    mentioned = [
+        name for name in library_names
+        if phrase_is_in_message(normalize(name))
+    ]
     if len(mentioned) == 1:
         return mentioned[0]
     if len(mentioned) > 1:
-        raise ValueError(
-            "More than one existing document was named in the delete request. "
-            "Please request one document at a time."
-        )
+        raise AmbiguousDocumentReference(mentioned)
+
+    # A user may type a meaningful partial name such as "אישור לימודים" while
+    # the library contains prefixes/suffixes. Only use the model's reference
+    # for this expansion when that same phrase is present in the current turn,
+    # preventing an old filename from conversation history leaking into delete.
+    if phrase_is_in_message(normalized_model_name):
+        partial_matches = [
+            name for name in library_names
+            if re.search(
+                rf"(?<!\w){re.escape(normalized_model_name)}(?!\w)",
+                normalize(name),
+            )
+        ]
+        if len(partial_matches) == 1:
+            return partial_matches[0]
+        if len(partial_matches) > 1:
+            raise AmbiguousDocumentReference(partial_matches)
+
     return model_file_name
 
 
@@ -460,13 +499,27 @@ def stream_agent(
                 "delete_document",
                 "replace_document",
             }:
-                confirmation = _prepare_confirmation(
-                    tool_name=tool.name,
-                    arguments=arguments,
-                    requested_by=requested_by,
-                    source_blob_path=source_blob_path,
-                    user_message=user_message,
-                )
+                try:
+                    confirmation = _prepare_confirmation(
+                        tool_name=tool.name,
+                        arguments=arguments,
+                        requested_by=requested_by,
+                        source_blob_path=source_blob_path,
+                        user_message=user_message,
+                    )
+                except AmbiguousDocumentReference as exc:
+                    choices = "\n".join(
+                        f"- `{name}`" for name in exc.candidates
+                    )
+                    yield AgentEvent(
+                        type="delta",
+                        delta=(
+                            "מצאתי כמה קבצים שמתאימים לשם שביקשת. "
+                            "שלח שוב את שם הקובץ המדויק שברצונך למחוק:\n"
+                            f"{choices}"
+                        ),
+                    )
+                    return
 
                 yield AgentEvent(
                     type="confirmation",
