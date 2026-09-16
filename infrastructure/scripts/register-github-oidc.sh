@@ -11,6 +11,15 @@
 #   ./register-github-oidc.sh davidkorenblit/lab-for-tecktika rg-ragpoc-dev swedencentral dev
 set -euo pipefail
 
+# On Git-Bash/MSYS (Windows), any argument starting with "/" — like the
+# "/subscriptions/<id>/resourceGroups/<rg>" scope below — gets silently
+# rewritten to a Windows path (e.g. "C:/Program Files/Git/subscriptions/...")
+# before az.exe ever sees it, since MSYS assumes it's a filesystem path meant
+# for the native binary being invoked. That corrupted scope is what az's API
+# call reports back as "MissingSubscription". This opts out of that rewriting;
+# it's a no-op on real POSIX shells (macOS/Linux CI runners, WSL).
+export MSYS_NO_PATHCONV=1
+
 GITHUB_REPO="${1:?Usage: register-github-oidc.sh <github-owner/repo> <resource-group-name> [location] [environment-name]}"
 RESOURCE_GROUP="${2:?Usage: register-github-oidc.sh <github-owner/repo> <resource-group-name> [location] [environment-name]}"
 LOCATION="${3:-swedencentral}"
@@ -20,21 +29,28 @@ APP_DISPLAY_NAME="gha-oidc-$(echo "$RESOURCE_GROUP" | tr '[:upper:]' '[:lower:]'
 echo "==> Ensuring resource group '$RESOURCE_GROUP' exists in $LOCATION"
 az group create --name "$RESOURCE_GROUP" --location "$LOCATION" --output none
 
-EXISTING_APP_ID=$(az ad app list --display-name "$APP_DISPLAY_NAME" --query "[0].appId" -o tsv)
+# Azure CLI on Windows emits CRLF even for -o tsv; `tr -d '\r'` strips the
+# stray carriage return that `$(...)` command substitution otherwise leaves
+# embedded at the end of the captured value (bash only trims the \n).
+EXISTING_APP_ID=$(az ad app list --display-name "$APP_DISPLAY_NAME" --query "[0].appId" -o tsv | tr -d '\r')
 
 if [ -n "$EXISTING_APP_ID" ]; then
   echo "==> Reusing existing app registration '$APP_DISPLAY_NAME' ($EXISTING_APP_ID)"
   APP_ID="$EXISTING_APP_ID"
 else
   echo "==> Creating app registration '$APP_DISPLAY_NAME'"
-  APP_ID=$(az ad app create --display-name "$APP_DISPLAY_NAME" --sign-in-audience AzureADMyOrg --query appId -o tsv)
+  APP_ID=$(az ad app create --display-name "$APP_DISPLAY_NAME" --sign-in-audience AzureADMyOrg --query appId -o tsv | tr -d '\r')
 fi
 
-SP_ID=$(az ad sp list --filter "appId eq '$APP_ID'" --query "[0].id" -o tsv)
+# `az ad sp list --filter "appId eq ..."` can fail on some CLI/Graph API
+# versions with "Unsupported or invalid query filter clause specified for
+# property 'appId'". `az ad sp show --id <appId>` looks up the same service
+# principal directly and sidesteps the broken filter query.
+SP_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv 2>/dev/null | tr -d '\r' || true)
 NEWLY_CREATED_SP=false
 if [ -z "$SP_ID" ]; then
   echo "==> Creating service principal for the app"
-  SP_ID=$(az ad sp create --id "$APP_ID" --query id -o tsv)
+  SP_ID=$(az ad sp create --id "$APP_ID" --query id -o tsv | tr -d '\r')
   NEWLY_CREATED_SP=true
 fi
 
@@ -115,7 +131,7 @@ create_federated_credential "gh-environment-${GH_ENVIRONMENT}" "repo:${SUBJECT_R
 create_federated_credential "gh-branch-main" "repo:${SUBJECT_REPO}:ref:refs/heads/main"
 
 echo "==> Granting least-privilege roles on '$RESOURCE_GROUP' only (not the whole subscription)"
-RG_ID=$(az group show --name "$RESOURCE_GROUP" --query id -o tsv)
+RG_ID=$(az group show --name "$RESOURCE_GROUP" --query id -o tsv | tr -d '\r')
 
 # A service principal just created can take up to ~30-60s to replicate through
 # Entra ID; assigning a role to it before that finishes fails with
@@ -157,8 +173,8 @@ assign_role "Contributor"
 # and Contributor alone cannot grant Microsoft.Authorization/roleAssignments/write.
 assign_role "Role Based Access Control Administrator"
 
-TENANT_ID=$(az account show --query tenantId -o tsv)
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+TENANT_ID=$(az account show --query tenantId -o tsv | tr -d '\r')
+SUBSCRIPTION_ID=$(az account show --query id -o tsv | tr -d '\r')
 
 echo ""
 echo "==> Done. Add these as GitHub Actions secrets on $GITHUB_REPO:"
