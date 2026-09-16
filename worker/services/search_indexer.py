@@ -16,7 +16,6 @@ from azure.search.documents.indexes.models import (
     SearchIndexerDataSourceConnection,
     SearchIndexerDataContainer,
     SearchIndexerSkillset,
-    SplitSkill,
     InputFieldMappingEntry,
     OutputFieldMappingEntry,
     AzureOpenAIEmbeddingSkill,
@@ -29,6 +28,7 @@ from azure.search.documents.indexes.models import (
     SearchIndexerIndexProjectionsParameters,
     IndexProjectionMode,
     DocumentIntelligenceLayoutSkill,
+    DocumentIntelligenceLayoutSkillChunkingProperties,
     AIServicesAccountIdentity,
 )
 
@@ -42,7 +42,7 @@ class SearchPipelineSetupService:
     Idempotent setup service for Azure AI Search data-plane resources:
     - Data Source Connection (Blob Storage)
     - Search Index (with HNSW vector profile and corrected schema)
-    - Skillset (Text splitting with overlap + Azure OpenAI embeddings)
+    - Skillset (Layout-aware chunked extraction + Azure OpenAI embeddings)
     - Search Indexer (Connecting source, skillset, and target index)
     """
 
@@ -191,36 +191,44 @@ class SearchPipelineSetupService:
     def create_or_update_skillset(self) -> SearchIndexerSkillset:
         """
         Idempotently creates or updates the Skillset with:
-        - SplitSkill: Splits PDF text into pages with overlap
+        - DocumentIntelligenceLayoutSkill: Extracts text and chunks it into page-sized
+          sections (chunkingProperties) - outputFormat="text" is required to get a
+          real content string per chunk; "markdown" mode has no equivalent field.
         - AzureOpenAIEmbeddingSkill: Vectorizes chunks with text-embedding-3-small (1536d)
         """
         logging.info(f"Setting up Skillset: '{self.skillset_name}'...")
 
-        # Document Intelligence Layout Skill for layout-aware reading order, table preservation, and clean OCR
+        # Document Intelligence Layout Skill for layout-aware reading order, table preservation, and clean OCR.
+        #
+        # outputMode is *always* "oneToMany" for this skill - there's no flat,
+        # single-string output. The previous config (outputFormat defaulting
+        # to "markdown", read here as a scalar "/document/layout_content")
+        # asked for a field that never existed: markdown mode's real output
+        # is the "markdown_document" array, not a string, so the downstream
+        # split skill's "text" input was always empty and every document was
+        # indexed with no content, silently.
+        #
+        # outputFormat="text" + chunkingProperties instead produces
+        # "text_sections": an array of chunk objects that already carry a
+        # flat `content` string and `locationMetadata.pageNumber`, chunked to
+        # the same maximumLength/overlapLength the old SplitSkill used - so
+        # SplitSkill is no longer needed as a separate stage.
         layout_skill = DocumentIntelligenceLayoutSkill(
             name="document-intelligence-layout-skill",
-            description="Extracts layout and reading-order aware text using Azure AI Document Intelligence",
+            description="Extracts layout-aware text using Azure AI Document Intelligence, chunked into page-sized sections",
             context="/document",
+            output_format="text",
+            extraction_options=["locationMetadata"],
+            chunking_properties=DocumentIntelligenceLayoutSkillChunkingProperties(
+                unit="characters",
+                maximum_length=2000,
+                overlap_length=500,
+            ),
             inputs=[
                 InputFieldMappingEntry(name="file_data", source="/document/file_data"),
             ],
             outputs=[
-                OutputFieldMappingEntry(name="content", target_name="layout_content"),
-            ],
-        )
-
-        split_skill = SplitSkill(
-            name="split-skill",
-            description="Splits document content into pages with overlap",
-            context="/document",
-            text_split_mode="pages",
-            maximum_page_length=2000,
-            page_overlap_length=500,
-            inputs=[
-                InputFieldMappingEntry(name="text", source="/document/layout_content"),
-            ],
-            outputs=[
-                OutputFieldMappingEntry(name="textItems", target_name="pages"),
+                OutputFieldMappingEntry(name="text_sections", target_name="text_sections"),
             ],
         )
 
@@ -228,11 +236,11 @@ class SearchPipelineSetupService:
         skill_kwargs = {
             "name": "openai-embedding-skill",
             "description": "Generates text embeddings using Azure OpenAI text-embedding-3-small",
-            "context": "/document/pages/*",
+            "context": "/document/text_sections/*",
             "deployment_name": self.embedding_deployment,
             "model_name": "text-embedding-3-small",
             "inputs": [
-                InputFieldMappingEntry(name="text", source="/document/pages/*"),
+                InputFieldMappingEntry(name="text", source="/document/text_sections/*/content"),
             ],
             "outputs": [
                 OutputFieldMappingEntry(name="embedding", target_name="text_vector"),
@@ -252,10 +260,11 @@ class SearchPipelineSetupService:
                 SearchIndexerIndexProjectionSelector(
                     target_index_name=self.index_name,
                     parent_key_field_name="parentDocumentId",
-                    source_context="/document/pages/*",
+                    source_context="/document/text_sections/*",
                     mappings=[
-                        InputFieldMappingEntry(name="content", source="/document/pages/*"),
-                        InputFieldMappingEntry(name="text_vector", source="/document/pages/*/text_vector"),
+                        InputFieldMappingEntry(name="content", source="/document/text_sections/*/content"),
+                        InputFieldMappingEntry(name="text_vector", source="/document/text_sections/*/text_vector"),
+                        InputFieldMappingEntry(name="page", source="/document/text_sections/*/locationMetadata/pageNumber"),
                         InputFieldMappingEntry(name="fileName", source="/document/metadata_storage_name"),
                         InputFieldMappingEntry(name="sourceUrl", source="/document/metadata_storage_path"),
                     ],
@@ -268,8 +277,8 @@ class SearchPipelineSetupService:
 
         skillset = SearchIndexerSkillset(
             name=self.skillset_name,
-            description="Skillset for Document Intelligence extraction, page splitting and OpenAI vector embedding",
-            skills=[layout_skill, split_skill, embedding_skill],
+            description="Skillset for Document Intelligence layout-aware chunked extraction and OpenAI vector embedding",
+            skills=[layout_skill, embedding_skill],
             index_projection=index_projection,
             # DocumentIntelligenceLayoutSkill only has a small daily free
             # quota; beyond that (or, apparently, immediately for some

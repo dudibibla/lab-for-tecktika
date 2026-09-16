@@ -12,7 +12,7 @@ def test_search_pipeline_setup(MockCredential, MockIndexClient, MockIndexerClien
     Verifies that SearchPipelineSetupService idempotently creates or updates:
     1. Data Source Connection
     2. Index with proper schema (parentDocumentId, fileName, page, sourceUrl, text_vector 1536d)
-    3. Skillset with SplitSkill and OpenAIEmbeddingSkill
+    3. Skillset with DocumentIntelligenceLayoutSkill (text-chunked) and OpenAIEmbeddingSkill
     4. Indexer with field mappings
     """
     mock_index_client = MockIndexClient.return_value
@@ -55,21 +55,31 @@ def test_search_pipeline_setup(MockCredential, MockIndexClient, MockIndexerClien
     mock_indexer_client.create_or_update_skillset.assert_called_once()
     skillset_arg = mock_indexer_client.create_or_update_skillset.call_args[0][0]
     assert skillset_arg.name == service.skillset_name
-    assert len(skillset_arg.skills) == 3
+    assert len(skillset_arg.skills) == 2
 
-    layout_skill, split_skill, embedding_skill = skillset_arg.skills
+    layout_skill, embedding_skill = skillset_arg.skills
 
     # Document Intelligence layout extraction runs first, so reading order
     # (RTL included) comes from the layout-aware skill instead of the
     # default OCR/content cracking.
+    #
+    # outputMode is always "oneToMany" for this skill - there's no flat
+    # single-string output. outputFormat must be "text" (not the default
+    # "markdown") to get a chunk object with a real "content" string;
+    # markdown mode's output ("markdown_document") has no such field, so a
+    # downstream skill reading it as scalar text always gets nothing.
     assert layout_skill.odata_type == "#Microsoft.Skills.Util.DocumentIntelligenceLayoutSkill"
     assert layout_skill.inputs[0].source == "/document/file_data"
-    assert layout_skill.outputs[0].target_name == "layout_content"
+    assert layout_skill.output_format == "text"
+    assert layout_skill.outputs[0].target_name == "text_sections"
+    assert layout_skill.chunking_properties.maximum_length == 2000
+    assert layout_skill.chunking_properties.overlap_length == 500
 
-    # SplitSkill must consume the layout skill's output, not raw content -
-    # otherwise the layout extraction is wired in but never actually used.
-    assert split_skill.text_split_mode == "pages"
-    assert split_skill.inputs[0].source == "/document/layout_content"
+    # The embedding skill must consume the layout skill's per-chunk content,
+    # not raw/whole-document content - otherwise the layout extraction is
+    # wired in but never actually used.
+    assert embedding_skill.context == "/document/text_sections/*"
+    assert embedding_skill.inputs[0].source == "/document/text_sections/*/content"
 
     # Without billing attached, DocumentIntelligenceLayoutSkill silently
     # produces no output past its small free quota - identity-based, not a
@@ -86,10 +96,11 @@ def test_search_pipeline_setup(MockCredential, MockIndexClient, MockIndexerClien
     selector = proj.selectors[0]
     assert selector.target_index_name == service.index_name
     assert selector.parent_key_field_name == "parentDocumentId"
-    assert selector.source_context == "/document/pages/*"
+    assert selector.source_context == "/document/text_sections/*"
     selector_mappings = {m.name: m.source for m in selector.mappings}
-    assert selector_mappings["content"] == "/document/pages/*"
-    assert selector_mappings["text_vector"] == "/document/pages/*/text_vector"
+    assert selector_mappings["content"] == "/document/text_sections/*/content"
+    assert selector_mappings["text_vector"] == "/document/text_sections/*/text_vector"
+    assert selector_mappings["page"] == "/document/text_sections/*/locationMetadata/pageNumber"
     assert selector_mappings["fileName"] == "/document/metadata_storage_name"
     assert selector_mappings["sourceUrl"] == "/document/metadata_storage_path"
 
