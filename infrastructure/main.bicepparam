@@ -31,7 +31,12 @@ param searchSkuName = 'basic'
 // every merge to main. Pinned to `:latest` here (rather than left as the quickstart
 // placeholder) so an infra-only redeploy converges the Container App back onto the
 // real image instead of reverting it to the placeholder.
-param backendContainerImage = 'ghcr.io/davidkorenblit/lab-for-tecktika-backend:latest'
+//
+// Repo moved to dudibibla/lab-for-tecktika after the davidkorenblit GitHub
+// account was blocked - ghcr.io/davidkorenblit/lab-for-tecktika-backend is no
+// longer pullable at all (not just un-buildable), which fails every infra
+// redeploy outright ("DENIED: requested access to the resource is denied").
+param backendContainerImage = 'ghcr.io/dudibibla/lab-for-tecktika-backend:latest'
 
 // From register-entra-app.sh (Entra ID App Registration for user sign-in).
 param entraTenantId = '6fc8a795-8bcb-4e52-8b36-41c1971e6816'
