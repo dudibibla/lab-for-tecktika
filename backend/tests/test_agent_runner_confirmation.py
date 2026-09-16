@@ -40,7 +40,7 @@ def test_delete_tool_creates_confirmation_event() -> None:
         patch(
             "app.agent.runner.create_chat_completion",
             return_value=response,
-        ),
+        ) as create_completion,
         patch(
             "app.agent.runner.list_library_documents",
             return_value=["Q3-report.pdf"],
@@ -74,6 +74,7 @@ def test_delete_tool_creates_confirmation_event() -> None:
     assert event.confirmation.action == "delete"
     assert event.confirmation.files == ["Q3-report.pdf"]
     assert event.confirmation.destructive is True
+    create_completion.assert_not_called()
 
     create_confirmation.assert_called_once_with(
         action="DELETE",

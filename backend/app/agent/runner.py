@@ -20,7 +20,7 @@ from app.agent.tools.search_tool import SearchDocumentsTool
 from app.schemas.chat import ChatHistoryMessage, Citation
 from app.schemas.confirmation import ConfirmationEvent
 from app.schemas.jobs import JobOperation
-from app.schemas.tools import SearchDocumentsArgs
+from app.schemas.tools import DeleteDocumentArgs, SearchDocumentsArgs
 from app.services.azure_openai import (
     create_chat_completion,
     stream_chat_completion,
@@ -50,6 +50,60 @@ class AmbiguousDocumentReference(ValueError):
     def __init__(self, candidates: list[str]) -> None:
         self.candidates = candidates
         super().__init__("Document name is ambiguous")
+
+
+def _normalize_document_reference(value: str) -> str:
+    value = unicodedata.normalize("NFKC", value).casefold()
+    value = re.sub(r"\.pdf(?=\W|$)", "", value)
+    value = value.replace("_", " ")
+    value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
+    return " ".join(value.split())
+
+
+def _direct_delete_file_name(user_message: str) -> str | None:
+    """Resolve explicit delete requests without involving the language model."""
+    normalized_message = _normalize_document_reference(user_message)
+    delete_pattern = r"(?:^|\s)(?:מחק|תמחק|למחוק|מחיקה|delete|remove)(?:\s|$)"
+    delete_match = re.search(delete_pattern, normalized_message)
+    if delete_match is None:
+        return None
+
+    reference = normalized_message[delete_match.end():]
+    reference = re.sub(
+        r"^(?:את הקובץ|הקובץ|קובץ|את|the|file|document|please)\s+",
+        "",
+        reference,
+    ).strip()
+    if not reference:
+        return None
+
+    library_names = list_library_documents()
+
+    def phrase_in_message(name: str) -> bool:
+        phrase = _normalize_document_reference(name)
+        return bool(phrase) and re.search(
+            rf"(?<!\w){re.escape(phrase)}(?!\w)",
+            normalized_message,
+        ) is not None
+
+    exact_mentions = [name for name in library_names if phrase_in_message(name)]
+    if len(exact_mentions) == 1:
+        return exact_mentions[0]
+    if len(exact_mentions) > 1:
+        raise AmbiguousDocumentReference(exact_mentions)
+
+    partial_matches = [
+        name for name in library_names
+        if re.search(
+            rf"(?<!\w){re.escape(reference)}(?!\w)",
+            _normalize_document_reference(name),
+        )
+    ]
+    if len(partial_matches) == 1:
+        return partial_matches[0]
+    if len(partial_matches) > 1:
+        raise AmbiguousDocumentReference(partial_matches)
+    return None
 
 
 def _build_messages(
@@ -235,15 +289,8 @@ def _delete_file_name_from_current_message(
     Otherwise compare the message with the live library and correct the tool
     argument only when exactly one existing filename is stated verbatim.
     """
-    def normalize(value: str) -> str:
-        value = unicodedata.normalize("NFKC", value).casefold()
-        value = re.sub(r"\.pdf(?=\W|$)", "", value)
-        value = value.replace("_", " ")
-        value = re.sub(r"[^\w]+", " ", value, flags=re.UNICODE)
-        return " ".join(value.split())
-
-    normalized_message = normalize(user_message)
-    normalized_model_name = normalize(model_file_name)
+    normalized_message = _normalize_document_reference(user_message)
+    normalized_model_name = _normalize_document_reference(model_file_name)
     # Always return the canonical name read from Blob Storage. A name produced
     # by the model can look identical while containing different Unicode or
     # whitespace, which fails the resolver's intentionally exact comparison.
@@ -257,7 +304,7 @@ def _delete_file_name_from_current_message(
     # .pdf extension) that the user typed in this turn.
     mentioned = [
         name for name in library_names
-        if phrase_is_in_message(normalize(name))
+        if phrase_is_in_message(_normalize_document_reference(name))
     ]
     if len(mentioned) == 1:
         return mentioned[0]
@@ -273,7 +320,7 @@ def _delete_file_name_from_current_message(
             name for name in library_names
             if re.search(
                 rf"(?<!\w){re.escape(normalized_model_name)}(?!\w)",
-                normalize(name),
+                _normalize_document_reference(name),
             )
         ]
         if len(partial_matches) == 1:
@@ -438,6 +485,30 @@ def stream_agent(
     )
     openai_tools = [to_openai_tool(tool) for tool in _allowed_tools(fresh_attachment)]
     context_file_name = _conversation_file_context(history, attachment_file_name)
+
+    if not fresh_attachment:
+        try:
+            direct_delete_name = _direct_delete_file_name(user_message)
+        except AmbiguousDocumentReference as exc:
+            choices = "\n".join(f"- `{name}`" for name in exc.candidates)
+            yield AgentEvent(
+                type="delta",
+                delta=(
+                    "מצאתי כמה קבצים שמתאימים לשם שביקשת. "
+                    "שלח שוב את שם הקובץ המדויק שברצונך למחוק:\n"
+                    f"{choices}"
+                ),
+            )
+            return
+
+        if direct_delete_name:
+            confirmation = _prepare_confirmation(
+                tool_name="delete_document",
+                arguments=DeleteDocumentArgs(file_name=direct_delete_name),
+                requested_by=requested_by,
+            )
+            yield AgentEvent(type="confirmation", confirmation=confirmation)
+            return
 
     response = create_chat_completion(
         messages,
