@@ -1,8 +1,10 @@
 import logging
+from dataclasses import dataclass
 from collections.abc import Iterable, Iterator
 
 from openai.types.chat import (
     ChatCompletion,
+    ChatCompletionMessage,
     ChatCompletionMessageParam,
     ChatCompletionToolParam,
 )
@@ -11,6 +13,13 @@ from app.azure_clients import get_openai_client
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class _ToolCall:
+    id: str = ""
+    name: str = ""
+    arguments: str = ""
 
 
 def create_query_embedding(text: str) -> list[float]:
@@ -70,7 +79,7 @@ def stream_chat_completion(
     messages: Iterable[ChatCompletionMessageParam],
     *,
     tools: Iterable[ChatCompletionToolParam] | None = None,
-) -> Iterator[str]:
+) -> Iterator[str | ChatCompletionMessage]:
     client = get_openai_client()
 
     kwargs = {
@@ -85,14 +94,46 @@ def stream_chat_completion(
     try:
         stream = client.chat.completions.create(**kwargs)
 
+        tool_calls: dict[int, _ToolCall] = {}
+        text_parts: list[str] = []
         for chunk in stream:
             if not chunk.choices:
                 continue
 
-            content = chunk.choices[0].delta.content
+            choice = chunk.choices[0]
+            if getattr(choice, "finish_reason", None) in {"length", "content_filter"}:
+                raise ValueError("The model could not complete its answer. Please try again.")
+            delta = choice.delta
+            for call in getattr(delta, "tool_calls", None) or []:
+                entry = tool_calls.setdefault(call.index, _ToolCall())
+                if call.id:
+                    entry.id = call.id
+                if call.function:
+                    if call.function.name:
+                        entry.name += call.function.name
+                    if call.function.arguments:
+                        entry.arguments += call.function.arguments
+            content = delta.content
 
             if content:
+                text_parts.append(content)
                 yield content
+
+        if tool_calls:
+            yield ChatCompletionMessage(
+                role="assistant",
+                content="".join(text_parts) or None,
+                tool_calls=[{
+                    "id": tool_calls[index].id,
+                    "type": "function",
+                    "function": {
+                        "name": tool_calls[index].name,
+                        "arguments": tool_calls[index].arguments,
+                    },
+                } for index in sorted(tool_calls)],
+            )
+        elif not "".join(text_parts).strip():
+            raise ValueError("The model returned an empty answer. Please try again.")
 
     except Exception:
         logger.exception("Azure OpenAI streaming request failed")

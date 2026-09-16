@@ -36,6 +36,7 @@ TOOLS: tuple[BaseTool[BaseModel], ...] = (
 )
 
 
+MAX_TOOL_ROUNDS = 5
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARACTERS = 24_000
 AgentMessage = ChatCompletionMessageParam | ChatCompletionMessage
@@ -237,49 +238,46 @@ def run_agent(
     )
     openai_tools = [to_openai_tool(tool) for tool in _allowed_tools(fresh_attachment)]
 
-    response = create_chat_completion(
-        messages,
-        tools=openai_tools,
-    )
+    for round_index in range(MAX_TOOL_ROUNDS + 1):
+        response = create_chat_completion(messages, tools=openai_tools)
+        assistant_message = response.choices[0].message
+        tool_calls = assistant_message.tool_calls or []
+        if not tool_calls:
+            content = assistant_message.content or ""
+            if not content.strip():
+                raise ValueError("The model returned an empty answer. Please try again.")
+            return content
+        if round_index == MAX_TOOL_ROUNDS:
+            raise ValueError("The search limit was reached. Please narrow your question.")
 
-    assistant_message = response.choices[0].message
-    tool_calls = assistant_message.tool_calls or []
+        messages.append(assistant_message)
 
-    if not tool_calls:
-        return assistant_message.content or ""
+        for tool_call in tool_calls:
+            tool = get_tool_by_name(tool_call.function.name)
 
-    messages.append(assistant_message)
+            if tool.name not in {"search_documents", "list_documents"}:
+                raise ValueError(
+                    f"Tool '{tool.name}' requires streaming application-managed handling"
+                )
 
-    for tool_call in tool_calls:
-        tool = get_tool_by_name(tool_call.function.name)
 
-        if tool.name not in {"search_documents", "list_documents"}:
-            raise ValueError(
-                f"Tool '{tool.name}' requires streaming application-managed handling"
+            arguments = parse_tool_arguments(
+                tool,
+                tool_call.function.arguments,
+            )
+
+            result = tool.execute(arguments)
+
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result, default=str),
+                }
             )
 
 
-        arguments = parse_tool_arguments(
-            tool,
-            tool_call.function.arguments,
-        )
-
-        result = tool.execute(arguments)
-
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(result, default=str),
-            }
-        )
-
-    final_response = create_chat_completion(
-        messages,
-        tools=openai_tools,
-    )
-
-    return final_response.choices[0].message.content or ""
+    raise RuntimeError("Agent loop ended unexpectedly")
 
 
 def stream_agent(
@@ -305,78 +303,55 @@ def stream_agent(
     )
 
     assistant_message = response.choices[0].message
-    tool_calls = assistant_message.tool_calls or []
+    for round_index in range(MAX_TOOL_ROUNDS + 1):
+        tool_calls = assistant_message.tool_calls or []
 
-    if not tool_calls:
-        content = assistant_message.content or ""
+        if not tool_calls:
+            content = assistant_message.content or ""
 
-        if content:
-            yield AgentEvent(
-                type="delta",
-                delta=content,
-            )
+            if not content.strip():
+                raise ValueError("The model returned an empty answer. Please try again.")
 
-        return
-
-    messages.append(assistant_message)
-
-    for tool_call in tool_calls:
-        tool = get_tool_by_name(tool_call.function.name)
-
-        arguments = parse_tool_arguments(
-            tool,
-            tool_call.function.arguments,
-        )
-
-        # Hard guard: delete_document must never be called when a file was
-        # just attached to this message. _allowed_tools() already excludes it
-        # from the schema, but we enforce it here as a second layer of
-        # defence. Keyed on fresh_attachment, not source_blob_path — the
-        # latter may be a carried-over attachment from an earlier turn (see
-        # the chat endpoint's fallback), which must not block an unrelated
-        # delete request.
-        if tool.name == "delete_document" and fresh_attachment:
-            raise ValueError(
-                "Deletion cannot be performed while a file is attached. "
-                "Remove the attachment and try again."
-            )
-
-        if tool.name in {
-            "delete_document",
-            "replace_document",
-        }:
-            confirmation = _prepare_confirmation(
-                tool_name=tool.name,
-                arguments=arguments,
-                requested_by=requested_by,
-                source_blob_path=source_blob_path,
-            )
-
-            yield AgentEvent(
-                type="confirmation",
-                confirmation=confirmation,
-            )
-            return
-
-        if tool.name == "add_document":
-            if not source_blob_path:
-                raise ValueError(
-                    "Adding a document requires an uploaded attachment"
+            if content:
+                yield AgentEvent(
+                    type="delta",
+                    delta=content,
                 )
 
-            file_name = getattr(arguments, "file_name", None)
+            return
 
-            if not isinstance(file_name, str) or not file_name.strip():
-                raise ValueError("A valid file name is required")
+        if round_index == MAX_TOOL_ROUNDS:
+            raise ValueError("The search limit was reached. Please narrow your question.")
 
-            existing_documents = resolve_document(file_name)
+        messages.append(assistant_message)
 
-            if existing_documents:
-                # Instead of failing, pivot to a replace confirmation.
-                # The user attached a file with the same name as one already
-                # in the library — the intent is almost certainly to update it.
+        for tool_call in tool_calls:
+            tool = get_tool_by_name(tool_call.function.name)
+
+            arguments = parse_tool_arguments(
+                tool,
+                tool_call.function.arguments,
+            )
+
+            # Hard guard: delete_document must never be called when a file was
+            # just attached to this message. _allowed_tools() already excludes it
+            # from the schema, but we enforce it here as a second layer of
+            # defence. Keyed on fresh_attachment, not source_blob_path — the
+            # latter may be a carried-over attachment from an earlier turn (see
+            # the chat endpoint's fallback), which must not block an unrelated
+            # delete request.
+            if tool.name == "delete_document" and fresh_attachment:
+                raise ValueError(
+                    "Deletion cannot be performed while a file is attached. "
+                    "Remove the attachment and try again."
+                )
+
+            if tool.name in {
+                "delete_document",
+                "replace_document",
+            }:
                 confirmation = _prepare_confirmation(
-                    tool_name="replace_document",
+                    tool_name=tool.name,
                     arguments=arguments,
                     requested_by=requested_by,
                     source_blob_path=source_blob_path,
@@ -386,102 +361,138 @@ def stream_agent(
                     type="confirmation",
                     confirmation=confirmation,
                 )
+                return
+
+            if tool.name == "add_document":
+                if not source_blob_path:
+                    raise ValueError(
+                        "Adding a document requires an uploaded attachment"
+                    )
+
+                file_name = getattr(arguments, "file_name", None)
+
+                if not isinstance(file_name, str) or not file_name.strip():
+                    raise ValueError("A valid file name is required")
+
+                existing_documents = resolve_document(file_name)
+
+                if existing_documents:
+                    # Instead of failing, pivot to a replace confirmation.
+                    # The user attached a file with the same name as one already
+                    # in the library — the intent is almost certainly to update it.
+                    confirmation = _prepare_confirmation(
+                        tool_name="replace_document",
+                        arguments=arguments,
+                        requested_by=requested_by,
+                        source_blob_path=source_blob_path,
+                    )
+
+                    yield AgentEvent(
+                        type="confirmation",
+                        confirmation=confirmation,
+                    )
+
+                    yield AgentEvent(
+                        type="delta",
+                        delta=(
+                            f"הקובץ '{file_name}' כבר קיים במערכת. "
+                            "שלחתי בקשת אישור להחלפה — אשר כדי לעדכן."
+                        ),
+                    )
+                    return
+
+                job = create_job_and_enqueue(
+                    operation=JobOperation.ADD,
+                    file_name=file_name,
+                    blob_name=file_name,
+                    requested_by=requested_by,
+                    document_id=str(uuid4()),
+                    source_blob_path=source_blob_path,
+                )
 
                 yield AgentEvent(
-                    type="delta",
-                    delta=(
-                        f"הקובץ '{file_name}' כבר קיים במערכת. "
-                        "שלחתי בקשת אישור להחלפה — אשר כדי לעדכן."
+                    type="job",
+                    job=JobEvent(
+                        jobId=job.RowKey,
+                        status="queued",
+                        fileName=file_name,
                     ),
                 )
                 return
 
-            job = create_job_and_enqueue(
-                operation=JobOperation.ADD,
-                file_name=file_name,
-                blob_name=file_name,
-                requested_by=requested_by,
-                document_id=str(uuid4()),
-                source_blob_path=source_blob_path,
-            )
+            result = tool.execute(arguments)
 
-            yield AgentEvent(
-                type="job",
-                job=JobEvent(
-                    jobId=job.RowKey,
-                    status="queued",
-                    fileName=file_name,
-                ),
-            )
-            return
+            if tool.name == "search_documents":
+                citations: list[Citation] = []
 
-        result = tool.execute(arguments)
+                if isinstance(result, list):
+                    for item in result:
+                        if not isinstance(item, dict):
+                            continue
 
-        if tool.name == "search_documents":
-            citations: list[Citation] = []
+                        chunk_id = item.get("chunk_id")
+                        file_name = item.get("file_name")
 
-            if isinstance(result, list):
-                for item in result:
-                    if not isinstance(item, dict):
-                        continue
+                        if not chunk_id or not file_name:
+                            continue
 
-                    chunk_id = item.get("chunk_id")
-                    file_name = item.get("file_name")
+                        score = item.get("reranker_score")
+                        if score is None:
+                            score = item.get("score")
 
-                    if not chunk_id or not file_name:
-                        continue
-
-                    score = item.get("reranker_score")
-                    if score is None:
-                        score = item.get("score")
-
-                    citations.append(
-                        Citation(
-                            id=str(chunk_id),
-                            fileName=str(file_name),
-                            title=str(file_name),
-                            url=(
-                                str(item["source_url"])
-                                if item.get("source_url")
-                                else None
-                            ),
-                            page=(
-                                int(item["page"])
-                                if item.get("page") is not None
-                                else None
-                            ),
-                            snippet=(
-                                str(item["content"])
-                                if item.get("content")
-                                else None
-                            ),
-                            score=(
-                                float(score)
-                                if score is not None
-                                else None
-                            ),
+                        citations.append(
+                            Citation(
+                                id=str(chunk_id),
+                                fileName=str(file_name),
+                                title=str(file_name),
+                                url=(
+                                    str(item["source_url"])
+                                    if item.get("source_url")
+                                    else None
+                                ),
+                                page=(
+                                    int(item["page"])
+                                    if item.get("page") is not None
+                                    else None
+                                ),
+                                snippet=(
+                                    str(item["content"])
+                                    if item.get("content")
+                                    else None
+                                ),
+                                score=(
+                                    float(score)
+                                    if score is not None
+                                    else None
+                                ),
+                            )
                         )
+
+                if citations:
+                    yield AgentEvent(
+                        type="citations",
+                        citations=citations,
                     )
 
-            if citations:
-                yield AgentEvent(
-                    type="citations",
-                    citations=citations,
-                )
+            messages.append(
+                {
+                    "role": "tool",
+                    "tool_call_id": tool_call.id,
+                    "content": json.dumps(result, default=str),
+                }
+            )
 
-        messages.append(
-            {
-                "role": "tool",
-                "tool_call_id": tool_call.id,
-                "content": json.dumps(result, default=str),
-            }
-        )
 
-    for chunk in stream_chat_completion(
-        messages,
-        tools=openai_tools,
-    ):
-        yield AgentEvent(
-            type="delta",
-            delta=chunk,
-        )
+        next_message: ChatCompletionMessage | None = None
+        has_text = False
+        for chunk in stream_chat_completion(messages, tools=openai_tools):
+            if isinstance(chunk, ChatCompletionMessage):
+                next_message = chunk
+            else:
+                has_text = has_text or bool(chunk.strip())
+                yield AgentEvent(type="delta", delta=chunk)
+        if next_message is None:
+            if not has_text:
+                raise ValueError("The model returned an empty answer. Please try again.")
+            return
+        assistant_message = next_message
