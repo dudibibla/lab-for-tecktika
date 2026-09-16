@@ -54,7 +54,7 @@ def test_followup_search_fragments_produce_answer_and_preserve_tool_history():
     ):
         events = list(stream_agent("Where is the apartment?", requested_by="user1"))
     assert "".join(event.delta or "" for event in events) == "The address is 10 Test Street."
-    assert sum(event.type == "citations" for event in events) == 2
+    assert sum(event.type == "citations" for event in events) == 1
     assert search.call_count == 2
     assert search.call_args.args[0] == "apartment address"
     messages = client.chat.completions.create.call_args.kwargs["messages"]
@@ -141,7 +141,7 @@ def test_non_streaming_followup_search_returns_final_answer():
     assert search.call_count == 2
 
 
-def test_empty_answer_after_citations_reaches_client_as_sse_error():
+def test_empty_answer_does_not_expose_unanswered_search_as_citations():
     from app.api.v1.endpoints.chat import _sse_response
 
     client = MagicMock()
@@ -157,7 +157,7 @@ def test_empty_answer_after_citations_reaches_client_as_sse_error():
         frames = "".join(_sse_response(
             "conv_test", stream_agent("address", requested_by="user1"), "user1",
         ))
-    assert "event: citations" in frames
+    assert "event: citations" not in frames
     assert "event: error" in frames
     assert "empty answer" in frames
     assert "event: done" not in frames

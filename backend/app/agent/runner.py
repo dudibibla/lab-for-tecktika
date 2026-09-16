@@ -39,6 +39,7 @@ TOOLS: tuple[BaseTool[BaseModel], ...] = (
 MAX_TOOL_ROUNDS = 5
 MAX_HISTORY_MESSAGES = 20
 MAX_HISTORY_CHARACTERS = 24_000
+MAX_CITATIONS = 5
 AgentMessage = ChatCompletionMessageParam | ChatCompletionMessage
 
 
@@ -222,6 +223,37 @@ def _allowed_tools(fresh_attachment: bool) -> tuple[BaseTool[BaseModel], ...]:
     return TOOLS
 
 
+def _citations_from_results(result: object) -> list[Citation]:
+    if not isinstance(result, list):
+        return []
+
+    citations: list[Citation] = []
+    seen_chunk_ids: set[str] = set()
+    for item in result:
+        if not isinstance(item, dict):
+            continue
+        chunk_id = item.get("chunk_id")
+        file_name = item.get("file_name")
+        if not chunk_id or not file_name or str(chunk_id) in seen_chunk_ids:
+            continue
+        seen_chunk_ids.add(str(chunk_id))
+        score = item.get("reranker_score")
+        if score is None:
+            score = item.get("score")
+        citations.append(Citation(
+            id=str(chunk_id),
+            fileName=str(file_name),
+            title=str(file_name),
+            url=str(item["source_url"]) if item.get("source_url") else None,
+            page=int(item["page"]) if item.get("page") is not None else None,
+            snippet=str(item["content"]) if item.get("content") else None,
+            score=float(score) if score is not None else None,
+        ))
+        if len(citations) == MAX_CITATIONS:
+            break
+    return citations
+
+
 def run_agent(
     user_message: str,
     *,
@@ -303,6 +335,7 @@ def stream_agent(
     )
 
     assistant_message = response.choices[0].message
+    pending_citations: list[Citation] = []
     for round_index in range(MAX_TOOL_ROUNDS + 1):
         tool_calls = assistant_message.tool_calls or []
 
@@ -423,56 +456,10 @@ def stream_agent(
             result = tool.execute(arguments)
 
             if tool.name == "search_documents":
-                citations: list[Citation] = []
-
-                if isinstance(result, list):
-                    for item in result:
-                        if not isinstance(item, dict):
-                            continue
-
-                        chunk_id = item.get("chunk_id")
-                        file_name = item.get("file_name")
-
-                        if not chunk_id or not file_name:
-                            continue
-
-                        score = item.get("reranker_score")
-                        if score is None:
-                            score = item.get("score")
-
-                        citations.append(
-                            Citation(
-                                id=str(chunk_id),
-                                fileName=str(file_name),
-                                title=str(file_name),
-                                url=(
-                                    str(item["source_url"])
-                                    if item.get("source_url")
-                                    else None
-                                ),
-                                page=(
-                                    int(item["page"])
-                                    if item.get("page") is not None
-                                    else None
-                                ),
-                                snippet=(
-                                    str(item["content"])
-                                    if item.get("content")
-                                    else None
-                                ),
-                                score=(
-                                    float(score)
-                                    if score is not None
-                                    else None
-                                ),
-                            )
-                        )
-
-                if citations:
-                    yield AgentEvent(
-                        type="citations",
-                        citations=citations,
-                    )
+                # Only expose evidence from the most recent, refined search.
+                # Earlier rounds are intermediate reasoning and caused the UI
+                # to show dozens of duplicate and often less relevant sources.
+                pending_citations = _citations_from_results(result)
 
             messages.append(
                 {
@@ -484,15 +471,18 @@ def stream_agent(
 
 
         next_message: ChatCompletionMessage | None = None
-        has_text = False
+        text_chunks: list[str] = []
         for chunk in stream_chat_completion(messages, tools=openai_tools):
             if isinstance(chunk, ChatCompletionMessage):
                 next_message = chunk
             else:
-                has_text = has_text or bool(chunk.strip())
-                yield AgentEvent(type="delta", delta=chunk)
+                text_chunks.append(chunk)
         if next_message is None:
-            if not has_text:
+            if not any(chunk.strip() for chunk in text_chunks):
                 raise ValueError("The model returned an empty answer. Please try again.")
+            if pending_citations:
+                yield AgentEvent(type="citations", citations=pending_citations)
+            for chunk in text_chunks:
+                yield AgentEvent(type="delta", delta=chunk)
             return
         assistant_message = next_message

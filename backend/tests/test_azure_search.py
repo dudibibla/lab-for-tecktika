@@ -68,6 +68,21 @@ def test_hybrid_search_builds_parent_document_filter():
     )
 
 
+def test_hybrid_search_uses_semantic_reranking_when_configured():
+    mock_client = MagicMock()
+    mock_client.search.return_value = []
+
+    with patch(
+        "app.services.azure_search.get_search_client",
+        return_value=mock_client,
+    ):
+        hybrid_search(query="apartment address", query_vector=[0.1])
+
+    kwargs = mock_client.search.call_args.kwargs
+    assert kwargs["query_type"] == "semantic"
+    assert kwargs["semantic_configuration_name"] == "document-content-semantic"
+
+
 def test_hybrid_search_rejects_empty_query():
     with pytest.raises(ValueError, match="query must not be empty"):
         hybrid_search(

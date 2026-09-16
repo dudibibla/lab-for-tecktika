@@ -335,3 +335,22 @@ def test_stream_agent_executes_search_tool_and_streams_final_answer() -> None:
 
     search_tool.execute.assert_called_once()
     mock_stream.assert_called_once()
+
+
+def test_citations_are_deduplicated_and_capped() -> None:
+    from app.agent.runner import MAX_CITATIONS, _citations_from_results
+
+    results = [
+        {
+            "chunk_id": f"chunk-{index if index != 1 else 0}",
+            "file_name": "contract.pdf",
+            "content": f"result {index}",
+            "page": index + 1,
+        }
+        for index in range(MAX_CITATIONS + 3)
+    ]
+
+    citations = _citations_from_results(results)
+
+    assert len(citations) == MAX_CITATIONS
+    assert len({citation.id for citation in citations}) == MAX_CITATIONS

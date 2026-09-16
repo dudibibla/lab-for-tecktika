@@ -50,6 +50,11 @@ def test_search_pipeline_setup(MockCredential, MockIndexClient, MockIndexerClien
     vector_field = next(f for f in index_arg.fields if f.name == "text_vector")
     assert vector_field.vector_search_dimensions == 1536
     assert vector_field.vector_search_profile_name == "hnsw-profile"
+    assert index_arg.semantic_search.default_configuration_name == "document-content-semantic"
+    semantic_config = index_arg.semantic_search.configurations[0]
+    assert semantic_config.name == "document-content-semantic"
+    assert semantic_config.prioritized_fields.title_field.field_name == "fileName"
+    assert semantic_config.prioritized_fields.content_fields[0].field_name == "content"
 
     # Verify Skillset & IndexProjections
     mock_indexer_client.create_or_update_skillset.assert_called_once()

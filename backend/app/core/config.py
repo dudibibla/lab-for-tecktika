@@ -11,13 +11,7 @@ class Settings(BaseSettings):
     # Azure AI Search
     azure_search_endpoint: str = "https://srch-ragpoc-dev-qelri355piqlq.search.windows.net"
     azure_search_index_name: str = "pdf-chunks-index"
-    # The live index defines no semantic configuration at all, and
-    # azure_search.py only asks for semantic ranking when this is non-empty.
-    # Naming one that does not exist makes every query a 400: "This index
-    # must have valid semantic configurations defined before using the
-    # 'semanticConfiguration' query parameter." Set this once
-    # worker/services/search_indexer.py actually creates one.
-    azure_search_semantic_configuration_name: str = ""
+    azure_search_semantic_configuration_name: str = "document-content-semantic"
 
     # Azure AI Search schema fields
     # The index's key field is `id` - see the SearchField definitions in

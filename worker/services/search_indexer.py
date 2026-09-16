@@ -30,6 +30,10 @@ from azure.search.documents.indexes.models import (
     DocumentIntelligenceLayoutSkill,
     DocumentIntelligenceLayoutSkillChunkingProperties,
     AIServicesAccountIdentity,
+    SemanticConfiguration,
+    SemanticField,
+    SemanticPrioritizedFields,
+    SemanticSearch,
 )
 
 from config import settings
@@ -182,6 +186,18 @@ class SearchPipelineSetupService:
             name=self.index_name,
             fields=fields,
             vector_search=vector_search,
+            semantic_search=SemanticSearch(
+                default_configuration_name="document-content-semantic",
+                configurations=[
+                    SemanticConfiguration(
+                        name="document-content-semantic",
+                        prioritized_fields=SemanticPrioritizedFields(
+                            title_field=SemanticField(field_name="fileName"),
+                            content_fields=[SemanticField(field_name="content")],
+                        ),
+                    )
+                ],
+            ),
         )
 
         result = self.index_client.create_or_update_index(index)
