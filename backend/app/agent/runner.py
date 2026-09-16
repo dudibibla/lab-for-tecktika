@@ -18,6 +18,7 @@ from app.agent.tools.search_tool import SearchDocumentsTool
 from app.schemas.chat import ChatHistoryMessage, Citation
 from app.schemas.confirmation import ConfirmationEvent
 from app.schemas.jobs import JobOperation
+from app.schemas.tools import SearchDocumentsArgs
 from app.services.azure_openai import (
     create_chat_completion,
     stream_chat_completion,
@@ -254,6 +255,34 @@ def _citations_from_results(result: object) -> list[Citation]:
     return citations
 
 
+def _conversation_file_context(
+    history: list[ChatHistoryMessage] | None,
+    attachment_file_name: str | None,
+) -> str | None:
+    if attachment_file_name:
+        return attachment_file_name
+    for message in reversed(history or []):
+        attachments = getattr(message, "attachments", None) or []
+        names = [item.file_name for item in attachments if item.file_name]
+        if len(names) == 1:
+            return names[0]
+    return None
+
+
+def _apply_search_file_context(
+    arguments: BaseModel,
+    file_name: str | None,
+) -> BaseModel:
+    if (
+        isinstance(arguments, SearchDocumentsArgs)
+        and file_name
+        and not arguments.file_name
+        and not arguments.parent_document_id
+    ):
+        return arguments.model_copy(update={"file_name": file_name})
+    return arguments
+
+
 def run_agent(
     user_message: str,
     *,
@@ -269,6 +298,7 @@ def run_agent(
         attachment_file_name=attachment_file_name,
     )
     openai_tools = [to_openai_tool(tool) for tool in _allowed_tools(fresh_attachment)]
+    context_file_name = _conversation_file_context(history, attachment_file_name)
 
     for round_index in range(MAX_TOOL_ROUNDS + 1):
         response = create_chat_completion(messages, tools=openai_tools)
@@ -297,6 +327,7 @@ def run_agent(
                 tool,
                 tool_call.function.arguments,
             )
+            arguments = _apply_search_file_context(arguments, context_file_name)
 
             result = tool.execute(arguments)
 
@@ -328,6 +359,7 @@ def stream_agent(
         attachment_file_name=attachment_file_name,
     )
     openai_tools = [to_openai_tool(tool) for tool in _allowed_tools(fresh_attachment)]
+    context_file_name = _conversation_file_context(history, attachment_file_name)
 
     response = create_chat_completion(
         messages,
@@ -365,6 +397,7 @@ def stream_agent(
                 tool,
                 tool_call.function.arguments,
             )
+            arguments = _apply_search_file_context(arguments, context_file_name)
 
             # Hard guard: delete_document must never be called when a file was
             # just attached to this message. _allowed_tools() already excludes it

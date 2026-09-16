@@ -354,3 +354,45 @@ def test_citations_are_deduplicated_and_capped() -> None:
 
     assert len(citations) == MAX_CITATIONS
     assert len({citation.id for citation in citations}) == MAX_CITATIONS
+
+
+def test_search_inherits_latest_attachment_file_context() -> None:
+    from app.agent.runner import (
+        _apply_search_file_context,
+        _conversation_file_context,
+    )
+    from app.schemas.chat import ChatHistoryMessage, MessageAttachment
+    from app.schemas.tools import SearchDocumentsArgs
+
+    history = [ChatHistoryMessage(
+        id="message-1",
+        role="user",
+        content="What is the property address?",
+        attachments=[MessageAttachment(
+            fileId="file-1",
+            fileName="lease.pdf",
+            size=100,
+            blobPath="f_1234567890abcdef1234567890abcdef/lease.pdf",
+        )],
+    )]
+
+    context = _conversation_file_context(history, None)
+    arguments = _apply_search_file_context(
+        SearchDocumentsArgs(query="property address"),
+        context,
+    )
+
+    assert context == "lease.pdf"
+    assert isinstance(arguments, SearchDocumentsArgs)
+    assert arguments.file_name == "lease.pdf"
+
+
+def test_explicit_search_file_is_not_overwritten_by_conversation_context() -> None:
+    from app.agent.runner import _apply_search_file_context
+    from app.schemas.tools import SearchDocumentsArgs
+
+    arguments = SearchDocumentsArgs(query="address", file_name="other.pdf")
+
+    result = _apply_search_file_context(arguments, "lease.pdf")
+
+    assert result.file_name == "other.pdf"

@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.core.config import settings
-from app.services.azure_search import hybrid_search
+from app.services.azure_search import _rerank_for_intent, hybrid_search
 
 
 def test_hybrid_search_returns_structured_results():
@@ -97,3 +97,31 @@ def test_hybrid_search_rejects_empty_vector():
             query="test",
             query_vector=[],
         )
+
+
+def test_property_address_outranks_party_contact_address():
+    results = [
+        {
+            "content": "כתובות: האלון 71 שורש",
+            "page": 31,
+            "reranker_score": 3.8,
+        },
+        {
+            "content": "הבניין: בניין ברחוב ים סוף 7 בירושלים, גוש 30245 חלקה 207",
+            "page": 2,
+            "reranker_score": 2.1,
+        },
+    ]
+
+    reranked = _rerank_for_intent("מה כתובת הנכס?", results)
+
+    assert [item["page"] for item in reranked] == [2, 31]
+
+
+def test_non_address_query_keeps_azure_ranking():
+    results = [
+        {"content": "second", "reranker_score": 1.0},
+        {"content": "first", "reranker_score": 4.0},
+    ]
+
+    assert _rerank_for_intent("מה גובה שכר הדירה?", results) == results
