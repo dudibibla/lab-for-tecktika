@@ -159,6 +159,41 @@ def test_search_documents_tool_executes_embedding_and_search() -> None:
     assert result == expected_results
 
 
+def test_section_request_returns_retrieved_passages_without_fact_adjudication() -> None:
+    from unittest.mock import patch
+
+    from app.agent.tools.search_tool import SearchDocumentsTool
+
+    tool = SearchDocumentsTool()
+    arguments = tool.validate_args({
+        "query": "תציג את שאלה א מתוך המבחן",
+        "file_name": "מבחן גאומטריה.pdf",
+    })
+    passages = [{
+        "chunk_id": "page-1",
+        "content": "שאלה א: הוכח את המשפט הבא",
+        "file_name": "מבחן גאומטריה.pdf",
+        "page": 1,
+    }]
+
+    with (
+        patch(
+            "app.agent.tools.search_tool.create_query_embedding",
+            return_value=[0.1],
+        ),
+        patch(
+            "app.agent.tools.search_tool.hybrid_search",
+            return_value=passages,
+        ),
+        patch("app.agent.tools.search_tool.review_evidence") as review,
+    ):
+        result = tool.execute(arguments)
+
+    review.assert_not_called()
+    assert result[0]["content"] == passages[0]["content"]
+    assert result[0]["evidence_status"] == "clear"
+
+
 def test_parse_tool_arguments_returns_validated_model() -> None:
     from app.agent.runner import parse_tool_arguments
     from app.agent.tools.document_tools import DeleteDocumentTool

@@ -1,6 +1,7 @@
 import json
 import re
 import unicodedata
+from difflib import SequenceMatcher
 from uuid import uuid4
 from collections.abc import Iterator
 
@@ -104,6 +105,56 @@ def _direct_delete_file_name(user_message: str) -> str | None:
     if len(partial_matches) > 1:
         raise AmbiguousDocumentReference(partial_matches)
     return None
+
+
+def _explicit_file_context(user_message: str) -> str | None:
+    """Resolve a likely document mention, including a small spelling error."""
+    normalized_message = _normalize_document_reference(user_message)
+    if re.search(
+        r"(?:אילו קבצים|רשימת קבצים|קבצים (?:קיימים|יש)|"
+        r"ספר לי על הקבצים|list .*files|what (?:files|documents)|"
+        r"documents in|files available)",
+        normalized_message,
+    ):
+        return None
+    signals = (
+        "pdf", "מסמך", "קובץ", "נוהל", "מבחן", "חוזה",
+        "מידע לגבי", "information about", "document", "file",
+    )
+    if not any(signal in normalized_message for signal in signals):
+        return None
+
+    message_tokens = [token for token in normalized_message.split() if len(token) > 1]
+    if not message_tokens:
+        return None
+
+    ranked: list[tuple[float, int, str]] = []
+    for name in list_library_documents():
+        name_tokens = [
+            token for token in _normalize_document_reference(name).split()
+            if len(token) > 1
+        ]
+        if not name_tokens:
+            continue
+        similarities = [
+            max(
+                SequenceMatcher(None, name_token, message_token).ratio()
+                for message_token in message_tokens
+            )
+            for name_token in name_tokens
+        ]
+        matched = sum(score >= 0.72 for score in similarities)
+        score = sum(similarities) / len(similarities)
+        ranked.append((score, matched, name))
+
+    ranked.sort(reverse=True)
+    if not ranked:
+        return None
+    best_score, best_matched, best_name = ranked[0]
+    runner_up = ranked[1][0] if len(ranked) > 1 else 0.0
+    if best_matched < 2 or best_score < 0.58 or best_score - runner_up < 0.10:
+        return None
+    return best_name
 
 
 def _build_messages(
@@ -387,6 +438,12 @@ def _conversation_file_context(
     if attachment_file_name:
         return attachment_file_name
     for message in reversed(history or []):
+        citation_names = {
+            item.file_name for item in (getattr(message, "citations", None) or [])
+            if item.file_name
+        }
+        if len(citation_names) == 1:
+            return next(iter(citation_names))
         attachments = getattr(message, "attachments", None) or []
         names = [item.file_name for item in attachments if item.file_name]
         if len(names) == 1:
@@ -397,11 +454,13 @@ def _conversation_file_context(
 def _apply_search_file_context(
     arguments: BaseModel,
     file_name: str | None,
+    *,
+    force: bool = False,
 ) -> BaseModel:
     if (
         isinstance(arguments, SearchDocumentsArgs)
         and file_name
-        and not arguments.file_name
+        and (force or not arguments.file_name)
         and not arguments.parent_document_id
     ):
         return arguments.model_copy(update={"file_name": file_name})
@@ -423,7 +482,12 @@ def run_agent(
         attachment_file_name=attachment_file_name,
     )
     openai_tools = [to_openai_tool(tool) for tool in _allowed_tools(fresh_attachment)]
-    context_file_name = _conversation_file_context(history, attachment_file_name)
+    explicit_file_name = (
+        None if source_blob_path else _explicit_file_context(user_message)
+    )
+    context_file_name = explicit_file_name or _conversation_file_context(
+        history, attachment_file_name
+    )
 
     for round_index in range(MAX_TOOL_ROUNDS + 1):
         response = create_chat_completion(messages, tools=openai_tools)
@@ -452,7 +516,11 @@ def run_agent(
                 tool,
                 tool_call.function.arguments,
             )
-            arguments = _apply_search_file_context(arguments, context_file_name)
+            arguments = _apply_search_file_context(
+                arguments,
+                context_file_name,
+                force=bool(explicit_file_name),
+            )
 
             result = tool.execute(arguments)
 
@@ -484,7 +552,6 @@ def stream_agent(
         attachment_file_name=attachment_file_name,
     )
     openai_tools = [to_openai_tool(tool) for tool in _allowed_tools(fresh_attachment)]
-    context_file_name = _conversation_file_context(history, attachment_file_name)
 
     if not fresh_attachment:
         try:
@@ -509,6 +576,13 @@ def stream_agent(
             )
             yield AgentEvent(type="confirmation", confirmation=confirmation)
             return
+
+    explicit_file_name = (
+        None if source_blob_path else _explicit_file_context(user_message)
+    )
+    context_file_name = explicit_file_name or _conversation_file_context(
+        history, attachment_file_name
+    )
 
     response = create_chat_completion(
         messages,
@@ -546,7 +620,11 @@ def stream_agent(
                 tool,
                 tool_call.function.arguments,
             )
-            arguments = _apply_search_file_context(arguments, context_file_name)
+            arguments = _apply_search_file_context(
+                arguments,
+                context_file_name,
+                force=bool(explicit_file_name),
+            )
 
             # Hard guard: delete_document must never be called when a file was
             # just attached to this message. _allowed_tools() already excludes it

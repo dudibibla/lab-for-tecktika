@@ -469,3 +469,55 @@ def test_stream_agent_sends_previous_turns_to_model() -> None:
     assert messages[2]["content"] == "It is the vendor agreement."
     assert messages[3]["content"] == "What is its notice period?"
     assert events[0].delta == "It is 30 days."
+
+
+def test_conversation_context_uses_latest_single_cited_document() -> None:
+    from app.agent.runner import _conversation_file_context
+    from app.schemas.chat import Citation
+
+    history = [ChatHistoryMessage(
+        id="assistant-1",
+        role="assistant",
+        content="The exam has six questions.",
+        citations=[Citation(
+            id="chunk-1",
+            fileName="geometry-exam.pdf",
+            page=1,
+        )],
+    )]
+
+    assert _conversation_file_context(history, None) == "geometry-exam.pdf"
+
+
+def test_explicit_file_context_tolerates_a_small_spelling_error() -> None:
+    from app.agent.runner import _explicit_file_context
+
+    with patch(
+        "app.agent.runner.list_library_documents",
+        return_value=[
+            "נוהל העסקה ופיטורים מג'ונרט.pdf",
+            "נוהל רכש ומחירון ספקים מג'ונרט.pdf",
+        ],
+    ):
+        result = _explicit_file_context(
+            "אני רוצה מידע לגבי נוכל העסקה ופיטורים"
+        )
+
+    assert result == "נוהל העסקה ופיטורים מג'ונרט.pdf"
+
+
+def test_explicit_file_context_overrides_model_search_filename() -> None:
+    from app.agent.runner import _apply_search_file_context
+    from app.schemas.tools import SearchDocumentsArgs
+
+    arguments = SearchDocumentsArgs(
+        query="employment procedure",
+        file_name="wrong-file.pdf",
+    )
+    result = _apply_search_file_context(
+        arguments,
+        "employment-policy.pdf",
+        force=True,
+    )
+
+    assert result.file_name == "employment-policy.pdf"
