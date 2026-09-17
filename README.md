@@ -151,4 +151,5 @@ Push ל-`main` מפעיל workflow לפי הנתיבים שהשתנו:
 - [LIMITATIONS.md](LIMITATIONS.md) — מגבלות וסיכונים שנותרו.
 - [frontend/API.md](frontend/API.md) — חוזה ה-API בין ה-frontend ל-backend.
 - [docs/EXERCISE_REQUIREMENTS.md](docs/EXERCISE_REQUIREMENTS.md) — דרישות המטלה המקוריות.
+- [docs/LEARNING_GUIDE_HE.md](docs/LEARNING_GUIDE_HE.md) — מדריך Reverse Engineering ופרומפט ללימוד הפרויקט.
 - `plan.md`, `backend_plan.md`, `backend_context.md` — מסמכי תכנון היסטוריים, לא מקור למצב הנוכחי.
